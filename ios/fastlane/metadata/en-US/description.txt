@@ -1,0 +1,40 @@
+Plug your camera into your iPhone with a USB cable. Every frame you shoot appears on your phone at once, and you can drive the shutter and change settings from there.
+
+A camera's rear screen is small, and outdoors it is often unreadable. Tethr puts the frame you just took on the whole of your iPhone display — large enough to judge focus, and large enough to show a client or a subject.
+
+WHAT IT DOES
+
+Shots arrive on their own
+Every frame transfers as you take it and opens full-screen. Shooting RAW is no obstacle: Tethr reads the full-resolution preview out of the file itself, so what you see is sharp.
+
+Remote control from your phone
+Shutter speed, aperture, ISO, exposure compensation, white balance and shooting mode are all adjustable with a scrubber, always in sync with the camera body. Press the shutter button and the camera focuses first, then fires.
+
+Exposure meter
+The same exposure indicator you see in the viewfinder, in the header of the app.
+
+Import to Photos
+Pick the frames you want and save them to your iPhone's photo library.
+
+GPS
+Tethr uses your iPhone's location to record where each frame was taken. Cameras with no GPS of their own end up with geotagged photographs.
+
+Works with Tethr for Mac
+Send your recorded track straight to Tethr running on a Mac on the same network. When you later pull the card and import the RAW files there, the coordinates can be written into all of them at once.
+
+Clock sync
+On connection, the camera's internal clock is set from your iPhone.
+
+WHAT YOU NEED
+
+A digital camera that speaks PTP (Picture Transfer Protocol), and a USB cable to connect it to your iPhone. Depending on your devices, a camera adapter may be required. Set the camera's USB mode to MTP/PTP.
+
+ABOUT CAMERA SUPPORT
+
+Tethr is tested with the Nikon D300. Other PTP cameras may work for browsing, previewing and importing. Remote control — the shutter and the exposure settings — depends on vendor-specific commands and may not be available on every model.
+
+If you try it with your camera, please tell me how it went.
+
+PRIVACY
+
+Tethr collects nothing. No analytics, no advertising, no accounts. Your location stays on your device, except when you choose to send it to your own Mac.

@@ -1,0 +1,135 @@
+/* Tethr for Mac — English */
+
+/* 受信・転送 */
+"%@ から受信" = "Received from %@";
+"%@ から受信しました（%@）" = "Received from %@ (%@)";
+"待ち受けていません" = "Not listening";
+"「%@」として待ち受け中。iPhone の Tethr から送信してください" = "Listening as “%@”. Send from Tethr on your iPhone.";
+"受信中…" = "Receiving…";
+"受信に失敗: %@" = "Receive failed: %@";
+"受信できませんでした" = "Could not receive the data";
+"本体を受信できませんでした" = "Could not receive the body";
+"内容を解釈できませんでした" = "Could not read the contents";
+"形式が違います" = "Unexpected format";
+"大きさが不正です" = "Invalid size";
+
+/* 時計 */
+"カメラ時計" = "Camera clock";
+"Mac に合わせる" = "Match this Mac";
+"時計を Mac に合わせる" = "Set camera clock to this Mac";
+"一致" = "In sync";
+"%lld秒進み" = "%lld sec fast";
+"%lld秒遅れ" = "%lld sec slow";
+"%lld分" = "%lld min";
+"%lld時間%lld分" = "%lldh %lldm";
+"%@進み" = "%@ fast";
+"%@遅れ" = "%@ slow";
+
+/* 接続 */
+"接続" = "Connect";
+"切断" = "Disconnect";
+"接続中…" = "Connecting…";
+"未接続" = "Not connected";
+"接続状態" = "Connection";
+"カメラ" = "Camera";
+"起動時にカメラへ自動接続する" = "Connect to the camera on launch";
+"接続時、macOS の ptpcamerad は自動で退避します。ターミナル操作は不要です。" = "Tethr steps macOS’s ptpcamerad aside automatically. No Terminal needed.";
+"カメラが接続されていません。" = "No camera is connected.";
+"カメラが見つかりません。USB 接続と電源を確認してください。(%@)" = "No camera found. Check the USB connection and power. (%@)";
+"カメラが応答しません。USB ポートをリセットして再試行します。(%@)" = "The camera is not responding. Resetting the USB port and retrying. (%@)";
+"USB を掴めません。macOS の ptpcamerad が握ったままの可能性があります。(%@)" = "Cannot claim the USB device. macOS’s ptpcamerad may still be holding it. (%@)";
+"libgphoto2 のドライバが見つかりません。アプリを入れ直してください。" = "The libgphoto2 drivers are missing. Please reinstall the app.";
+
+/* 撮影 */
+"撮影設定" = "Exposure";
+"撮影設定パネル" = "Exposure panel";
+"露出モード" = "Exposure mode";
+"露出補正" = "Exposure comp.";
+"シャッター" = "Shutter";
+"絞り" = "Aperture";
+"画質" = "Quality";
+"モード" = "Mode";
+"バッファ %lld" = "Buffer %lld";
+"%lld 枚" = "%lld shots";
+"カメラのシャッターを押すと、ここに表示されます" = "Shots appear here as you release the shutter";
+"「接続」を押してください" = "Press Connect to begin";
+
+/* AF・フォーカス */
+"フォーカス" = "Focus";
+"AF を実行" = "Focus";
+"AF を実行（シャッター半押し相当）" = "Run autofocus (like a half-press)";
+"AF 実行中" = "Focusing";
+"AF 完了" = "Focused";
+"AF 失敗" = "Focus failed";
+"シャッター時に AF する" = "Autofocus before each shot";
+"本体の AF モードスイッチで切り替えます" = "Set with the focus-mode switch on the camera";
+"このモードではカメラが自動で決めます" = "The camera sets this in the current mode";
+
+/* ライブビュー */
+"ライブビュー" = "Live View";
+"ライブビューを開始" = "Start Live View";
+"ライブビューを止める" = "Stop Live View";
+"ライブビュー開始中…" = "Starting Live View…";
+"ミラーアップして映像を受け取ります" = "Raises the mirror and streams the sensor image";
+
+/* カメラ情報 */
+"シリアル番号" = "Serial number";
+"ファームウェア" = "Firmware";
+"レンズ" = "Lens";
+"焦点距離" = "Focal length";
+"現在 %@" = "Now %@";
+
+/* 保存先 */
+"保存" = "Storage";
+"一般" = "General";
+"テザー保存先" = "Tethered capture folder";
+"実際の保存先: %@" = "Actual destination: %@";
+"日付ごとのサブフォルダを作る" = "Create a subfolder for each day";
+"転送後にカメラのカードから削除する" = "Delete from the card after transfer";
+"既定はオフです。オンにすると転送に成功したファイルをカードから消します。" = "Off by default. When on, files are removed from the card once transferred.";
+"撮影ファイルはカメラ側の名前のまま保存され、同名があれば連番を付けます。" = "Files keep the camera’s own names; duplicates get a numeric suffix.";
+"保存先を開く" = "Open destination folder";
+"保存先を作成できません: %@" = "Cannot create the destination: %@";
+"保存先に書き込めません: %@" = "Cannot write to the destination: %@";
+"「%@」を保存できませんでした。\n%@\n\nカメラのカードには残っています。" = "Could not save “%@”.\n%@\n\nThe file is still on the camera’s card.";
+"転送できなかったコマ: %@  — カメラのカードには残っています" = "Not transferred: %@  — still on the camera’s card";
+
+/* 位置情報 */
+"位置情報" = "Location data";
+"写真フォルダ" = "Photo folder";
+"位置情報を付与" = "Add Locations";
+"位置情報を付与…" = "Add Locations…";
+"iPhone の Tethr で記録した撮影地点を、カードから取り込んだ写真へ書き込みます。" = "Writes the capture locations recorded by Tethr on your iPhone into photos copied from the card.";
+"位置情報ファイルを読めません: %@" = "Cannot read the location file: %@";
+"ファイル名で確定" = "Matched by filename";
+"撮影時刻から推定" = "Matched by capture time";
+"既に位置あり" = "Already located";
+"該当なし" = "No match";
+"時刻の許容差" = "Time tolerance";
+"30秒" = "30 sec";
+"2分" = "2 min";
+"10分" = "10 min";
+"1時間" = "1 hour";
+"±%lld秒" = "±%lld s";
+"既に位置がある写真も上書き" = "Overwrite photos that already have a location";
+"書き込む" = "Write";
+"%lld 件に書き込みました" = "Wrote %lld files";
+"%lld 件は書き込めませんでした: %@" = "%lld files could not be written: %@";
+"書き込まれませんでした" = "Nothing was written";
+"作業ファイルを作れません" = "Cannot create a working file";
+"exiftool が見つかりません" = "exiftool not found";
+
+/* その他 */
+"エラー" = "Error";
+"ログ" = "Log";
+"Finder で表示" = "Show in Finder";
+"選択…" = "Choose…";
+"変更…" = "Change…";
+"再確認" = "Re-check";
+"フィット" = "Fit";
+"等倍表示" = "Actual size";
+"設定を再読み込み" = "Reload settings";
+"本体の操作を戻す" = "Return control to the camera";
+"上面液晶の PC 表示を解除し、本体側の操作を有効にします" = "Clears the PC indicator and re-enables the camera’s own controls";
+"ドラッグ・ホイール・矢印キーで選択" = "Drag, scroll, or use the arrow keys";
+"接続に失敗したときは %@ に原因が残ります。" = "If connecting fails, the reason is recorded in %@.";

@@ -1,0 +1,139 @@
+# App Store Connect への投入。認証は2通りのどちらでもよい。
+#
+# (A) API キー方式 — 2FA 不要・期限なし。.p8 は作成直後にしか落とせないので注意。
+#   export ASC_KEY_ID=XXXXXXXXXX
+#   export ASC_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+#   export ASC_KEY_PATH=~/.appstoreconnect/AuthKey_XXXXXXXXXX.p8
+#
+# (B) Apple ID 方式 — .p8 が無いときはこちら。2FA のコードを都度入力する。
+#   export FASTLANE_USER=hina0902suzuki@icloud.com
+#   （ビルドのアップロードには App 用パスワードも要る）
+#   export FASTLANE_APPLE_APPLICATION_SPECIFIC_PASSWORD=xxxx-xxxx-xxxx-xxxx
+#
+#   2FA を毎回聞かれるのが煩わしければ、先に一度だけ:
+#     fastlane spaceauth -u hina0902suzuki@icloud.com
+#   と打って、出力された FASTLANE_SESSION を export しておく（約30日有効）。
+#
+# どちらの方式でも、鍵やパスワードの実体はこのファイルにも git にも入らない。
+
+APP_ID = "app.tethr.TethrTouch"
+
+# API キーが揃っていればそれを、無ければ Apple ID 方式にフォールバックする。
+def asc_auth
+  if %w[ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_PATH].all? { |v| !ENV[v].to_s.empty? }
+    path = File.expand_path(ENV["ASC_KEY_PATH"])
+    UI.user_error!("鍵が見つかりません: #{path}") unless File.exist?(path)
+    UI.message("認証: App Store Connect API キー (#{ENV['ASC_KEY_ID']})")
+    key = app_store_connect_api_key(
+      key_id: ENV["ASC_KEY_ID"],
+      issuer_id: ENV["ASC_ISSUER_ID"],
+      key_filepath: path,
+      in_house: false
+    )
+    { api_key: key }
+  elsif !ENV["FASTLANE_USER"].to_s.empty?
+    UI.message("認証: Apple ID (#{ENV['FASTLANE_USER']})")
+    UI.important("2FA のコードを聞かれたら入力してください。") if ENV["FASTLANE_SESSION"].to_s.empty?
+    { username: ENV["FASTLANE_USER"] }
+  else
+    UI.user_error!(
+      "認証情報がありません。次のどちらかを設定してください:\n" \
+      "  (A) ASC_KEY_ID / ASC_ISSUER_ID / ASC_KEY_PATH\n" \
+      "  (B) FASTLANE_USER"
+    )
+  end
+end
+
+platform :ios do
+
+  # アプリのレコード作成は fastlane では自動化できない。
+  # App Store Connect API は apps リソースの CREATE を許可しておらず
+  # (GET_COLLECTION / GET_INSTANCE / UPDATE のみ)、produce は API キーを
+  # 受け付けず Apple ID 方式（spaceship）しか持たない。
+  # → Web 画面で一度だけ作る。作ったあとは以下のレーンが全部使える。
+  desc "レコード作成の手順を表示（作成自体は Web 画面で行う）"
+  lane :create_app do
+    UI.important("アプリのレコードは App Store Connect の Web 画面で作成してください。")
+    UI.message("  https://appstoreconnect.apple.com/apps  →  ＋  →  新規 App")
+    UI.message("")
+    UI.message("  プラットフォーム : iOS")
+    UI.message("  名前             : Tethr – Wired Shot")
+    UI.message("  プライマリ言語   : 日本語")
+    UI.message("  バンドル ID      : #{APP_ID}")
+    UI.message("  SKU              : tethr-ios-001")
+    UI.message("  ユーザアクセス   : フルアクセス")
+    UI.message("")
+    UI.success("作成したら `./asc.sh metadata` で掲載文を流し込めます。")
+  end
+
+  desc "掲載文だけを反映（ビルドもスクショも触らない）"
+  lane :metadata do
+    deliver(
+      **asc_auth,
+      app_identifier: APP_ID,
+      skip_binary_upload: true,
+      skip_screenshots: true,
+      skip_app_version_update: false,
+      force: true,              # HTML プレビューの確認を省く
+      precheck_include_in_app_purchases: false,
+      submit_for_review: false
+    )
+  end
+
+  desc "スクリーンショットだけを反映（fastlane/screenshots/ を読む）"
+  lane :shots do
+    deliver(
+      **asc_auth,
+      app_identifier: APP_ID,
+      skip_binary_upload: true,
+      skip_metadata: true,
+      overwrite_screenshots: true,
+      force: true,
+      submit_for_review: false
+    )
+  end
+
+  desc "ビルド（.ipa）をアップロード。先に ./release.sh を実行しておくこと"
+  lane :upload_build do
+    ipa = File.expand_path("../build/export/TethrTouch.ipa", __dir__)
+    UI.user_error!("#{ipa} がありません。先に ./release.sh を実行してください") unless File.exist?(ipa)
+    deliver(
+      **asc_auth,
+      app_identifier: APP_ID,
+      ipa: ipa,
+      skip_metadata: true,
+      skip_screenshots: true,
+      force: true,
+      run_precheck_before_submit: false,   # 掲載文を触らないので不要。
+                                           # API キーでは IAP を検査できず止まる
+      submit_for_review: false
+    )
+  end
+
+  desc "App Store Connect 側の現在の状態を確認"
+  lane :status do
+    auth = asc_auth
+    begin
+      n = latest_testflight_build_number(**auth, app_identifier: APP_ID, version: "1.0")
+      UI.success("アップロード済みの最新ビルド: 1.0 (#{n})")
+    rescue => e
+      UI.error("ビルドを確認できません: #{e.message}")
+    end
+  end
+
+  desc "掲載文 + スクショ + ビルド をまとめて反映（提出はしない）"
+  lane :push_all do
+    ipa = File.expand_path("../build/export/TethrTouch.ipa", __dir__)
+    UI.user_error!("#{ipa} がありません。先に ./release.sh を実行してください") unless File.exist?(ipa)
+    deliver(
+      **asc_auth,
+      app_identifier: APP_ID,
+      ipa: ipa,
+      overwrite_screenshots: true,
+      force: true,
+      precheck_include_in_app_purchases: false,
+      submit_for_review: false   # 提出は App Store Connect 上で自分の目で確認してから
+    )
+  end
+
+end

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tethr — プライバシーポリシー</title>
+<meta name="theme-color" content="#0d0d0f">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="bar">
+  <a class="home" href="index.html"><img src="icon.png" alt=""><span class="name">Tethr</span></a>
+  <nav>
+    <a href="support.html"><span class="ja">サポート</span><span class="en">Support</span></a>
+    <button class="langtoggle" id="lang" type="button"></button>
+  </nav>
+</header>
+
+<main>
+<div class="prose doc">
+
+  <h1><span class="ja">プライバシーポリシー</span><span class="en">Privacy Policy</span></h1>
+  <p class="updated"><span class="ja">最終更新: 2026年9月11日</span><span class="en">Last updated: 11 September 2026</span></p>
+
+  <h2><span class="ja">要約</span><span class="en">Summary</span></h2>
+  <p class="ja">Tethr は利用者のデータを収集しません。開発者が閲覧できるサーバーへ送信することもありません。解析ツール、広告、トラッキング SDK は一切組み込んでいません。アカウント登録もありません。</p>
+  <p class="en">Tethr does not collect your data. Nothing is transmitted to any server the developer can access. The app contains no analytics, no advertising, and no tracking SDKs. There are no accounts.</p>
+
+  <h2><span class="ja">位置情報</span><span class="en">Location</span></h2>
+  <p class="ja">位置情報の記録を有効にした場合のみ、Tethr は端末の GPS から現在地を取得します。用途は次の2つだけです。</p>
+  <p class="en">Only when you enable location logging does Tethr read your position from the device's GPS. It is used for exactly two purposes:</p>
+  <ul class="ja">
+    <li>撮影した写真に撮影地点を記録（Exif GPS タグ）して、端末の写真ライブラリへ保存する</li>
+    <li>利用者自身が同じローカルネットワーク上で動かしている Mac 版 Tethr へ、利用者の操作にもとづいて軌跡を送信する</li>
+  </ul>
+  <ul class="en">
+    <li>Writing the capture location into your photos (Exif GPS tags) as they are saved to your device's photo library</li>
+    <li>Sending the track, at your request, to a copy of Tethr for Mac that you are running on the same local network</li>
+  </ul>
+  <p class="ja">取得した位置情報は端末内にのみ保存されます。開発者を含む第三者へ送信されることはありません。記録を無効にするか、アプリ内から履歴を削除すれば、保存された軌跡は端末から消去されます。</p>
+  <p class="en">Location data is stored only on your device. It is never transmitted to the developer or to any third party. Turning logging off, or clearing the history in the app, removes the stored track from your device.</p>
+  <p class="ja">本アプリはバックグラウンドでの位置情報取得を利用します。これは、撮影の合間に画面を消していても軌跡が途切れないようにするためです。扱いは上記と同一です。</p>
+  <p class="en">The app uses background location so that the track is not interrupted while your screen is off between shots. Background readings are handled exactly as described above.</p>
+
+  <h2><span class="ja">写真とカメラ</span><span class="en">Photos and camera</span></h2>
+  <p class="ja">USB 接続したカメラから読み込んだ画像は、利用者が「取り込む」を実行したときにのみ、端末の写真ライブラリへ保存されます。プレビュー用の一時データは端末内に置かれ、外部へは送信されません。</p>
+  <p class="en">Images read from a USB-connected camera are saved to your photo library only when you explicitly import them. Temporary preview data stays on the device and is never transmitted.</p>
+
+  <h2><span class="ja">ローカルネットワーク</span><span class="en">Local network</span></h2>
+  <p class="ja">Tethr は Bonjour（<code>_tethr._tcp</code>）を用いて、同一ネットワーク上の Mac 版 Tethr を検出します。通信は利用者の端末と利用者の Mac のあいだで直接行われ、外部のサーバーを経由しません。</p>
+  <p class="en">Tethr uses Bonjour (<code>_tethr._tcp</code>) to discover Tethr for Mac on the same network. The connection is made directly between your device and your Mac; no external server is involved.</p>
+
+  <h2><span class="ja">第三者への提供</span><span class="en">Third parties</span></h2>
+  <p class="ja">ありません。本アプリは第三者の SDK、解析基盤、広告ネットワークを利用していません。</p>
+  <p class="en">None. The app uses no third-party SDKs, analytics platforms, or ad networks.</p>
+
+  <h2><span class="ja">子どものプライバシー</span><span class="en">Children's privacy</span></h2>
+  <p class="ja">本アプリは特定の年齢層を対象としておらず、いかなる利用者からも個人情報を収集しません。</p>
+  <p class="en">This app is not directed at any particular age group and collects no personal information from anyone.</p>
+
+  <h2><span class="ja">お問い合わせ</span><span class="en">Contact</span></h2>
+  <p class="ja">本ポリシーに関するお問い合わせは <a href="mailto:hina0902suzuki@icloud.com">hina0902suzuki@icloud.com</a> までご連絡ください。</p>
+  <p class="en">Questions about this policy: <a href="mailto:hina0902suzuki@icloud.com">hina0902suzuki@icloud.com</a></p>
+
+  <h2><span class="ja">改定</span><span class="en">Changes</span></h2>
+  <p class="ja">本ポリシーを改定した場合は、本ページを更新し、上部の最終更新日を変更します。</p>
+  <p class="en">If this policy changes, this page will be updated and the date above revised.</p>
+
+</div>
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <a href="index.html">Tethr</a>
+    <a href="support.html"><span class="ja">サポート</span><span class="en">Support</span></a>
+    <a href="mailto:hina0902suzuki@icloud.com"><span class="ja">お問い合わせ</span><span class="en">Contact</span></a>
+    <span class="copy">© 2026 henaxxx</span>
+  </div>
+</footer>
+
+</div>
+<script src="lang.js"></script>
+</body>
+</html>

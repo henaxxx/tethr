@@ -1,0 +1,1 @@
+tether,tethered,shooting,camera,remote,shutter,dslr,mirrorless,usb,ptp,nikon,geotag,gps,photography

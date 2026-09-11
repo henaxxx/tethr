@@ -1,0 +1,83 @@
+/* Tethr for iOS — English */
+
+/* 接続 */
+"未接続" = "Not connected";
+"カメラを探しています…" = "Looking for a camera…";
+"%@ に接続中…" = "Connecting to %@…";
+"設定でカメラへのアクセスを許可してください" = "Allow camera access in Settings";
+"カメラを USB で接続してください" = "Connect a camera over USB";
+"カメラが接続されていません" = "No camera is connected";
+"カメラが応答しました: %@" = "The camera replied: %@";
+"カメラの時計を %lld 秒ぶん合わせました" = "Adjusted the camera clock by %lld seconds";
+
+/* 一覧 */
+"テザー (%lld)" = "Tethered (%lld)";
+"カード (%lld)" = "Card (%lld)";
+"カード 読込中 %lld%%" = "Card — loading %lld%%";
+"カードに写真がありません" = "No photos on the card";
+"カードを読み込んでいます…" = "Reading the card…";
+"シャッターを押すと、ここに表示されます" = "Shots appear here as you release the shutter";
+
+/* 取り込み */
+"取り込む" = "Import";
+"端末に取り込む" = "Import to this device";
+"取り込み済み" = "Imported";
+"写真アプリに保存済み" = "Saved to Photos";
+"取り込みに失敗しました: %@" = "Import failed: %@";
+"写真アプリに保存できませんでした: %@" = "Could not save to Photos: %@";
+"写真へのアクセスが許可されていません。設定から許可してください。" = "Photos access is not allowed. Please allow it in Settings.";
+
+/* 撮影設定 */
+"シャッター" = "Shutter";
+"絞り" = "Aperture";
+"モード" = "Mode";
+"露出補正" = "Exposure comp.";
+"バッテリー" = "Battery";
+"画像サイズ" = "Image size";
+"撮影できませんでした: %@" = "Could not take the shot: %@";
+"%@ を変更できませんでした: %@" = "Could not change %@: %@";
+
+/* ホワイトバランス */
+"マニュアル" = "Manual";
+"オート" = "Auto";
+"ワンタッチ" = "One-push";
+"晴天" = "Daylight";
+"蛍光灯" = "Fluorescent";
+"電球" = "Tungsten";
+"フラッシュ" = "Flash";
+
+/* 位置情報 */
+"位置情報" = "Location";
+"撮影地点を記録" = "Record capture locations";
+"画面を消しても軌跡を続ける" = "Keep tracking with the screen off";
+"カメラのカードには書き込めないため、位置は端末側に控えます。取り込むときに写真へ付き、RAW 本体には手を触れません。" = "The camera’s card cannot be written to, so locations are kept on this device. They are attached when you import, leaving the RAW file untouched.";
+"記録の状況" = "What’s recorded";
+"正確な位置" = "Exact locations";
+"%lld カット" = "%lld shots";
+"軌跡" = "Track";
+"%lld 点" = "%lld points";
+"記録時間" = "Duration";
+"%lld分" = "%lld min";
+"%lld時間%lld分" = "%lldh %lldm";
+"記録を消去" = "Clear recording";
+"記録を消去しますか" = "Clear the recording?";
+"控えてある撮影地点と軌跡がすべて失われます。取り込み済みの写真には影響しません。" = "All stored capture locations and track points will be lost. Photos you already imported are unaffected.";
+"「正確な位置」は接続中に撮ったカットの、ファイル名で確定した位置です。「軌跡」は接続していない間に撮ったカットを、撮影時刻で拾うための記録です。" = "“Exact locations” are tied to filenames for shots taken while connected. “Track” lets shots taken while untethered be matched by capture time.";
+
+/* Mac へ送る */
+"Mac へ送る" = "Send to Mac";
+"Mac を探しています…" = "Looking for a Mac…";
+"Mac 版 Tethr の「位置情報を付与」ウインドウを開いておくと、ここに現れます。同じ Wi-Fi でなくても、端末同士が直接繋がります。" = "Open the “Add Locations” window in Tethr for Mac and it will appear here. The devices connect directly, even without a shared Wi-Fi network.";
+"送る記録がまだありません" = "Nothing recorded to send yet";
+"%@ へ送信中…" = "Sending to %@…";
+"%@ へ送りました" = "Sent to %@";
+"接続できません: %@" = "Cannot connect: %@";
+"応答がありません" = "No response";
+"受け取りを拒否されました" = "The Mac declined the data";
+"送る内容を組み立てられませんでした" = "Could not prepare the data to send";
+
+/* その他 */
+"エラー" = "Error";
+"完了" = "Done";
+"消去" = "Clear";
+"やめる" = "Cancel";

@@ -1,0 +1,62 @@
+=== APP REVIEW NOTES (paste into App Store Connect → App Review Information → Notes) ===
+
+IMPORTANT — THIS APP REQUIRES EXTERNAL HARDWARE
+
+Tethr connects to a standalone digital camera (DSLR / mirrorless) over a wired USB
+connection, using the ImageCaptureCore framework. Without a camera physically
+attached, the app will launch and show its "No camera connected" state, and no
+further functionality can be exercised.
+
+Because this hardware cannot be supplied to the review team, a demonstration video
+of the current build running on a physical iPhone is provided here:
+
+    [DEMO VIDEO URL]
+
+The video shows, in one continuous take:
+  1. Launching the app with no camera attached (the disconnected state).
+  2. Attaching a Nikon D300 DSLR via a USB camera adapter and the app detecting it.
+  3. The connected state: camera model, lens, and current exposure settings read
+     live from the camera body.
+  4. Changing shutter speed, aperture and ISO from the app, with the camera's own
+     top display changing to match.
+  5. Releasing the shutter from the app, autofocus running first.
+  6. The captured frame arriving in the app and being previewed full-screen.
+  7. Importing that frame into the iOS photo library, with GPS coordinates from the
+     iPhone written into the file.
+
+NO ACCOUNT IS REQUIRED. There is no sign-in, no server, and no paid content.
+
+PERMISSIONS AND WHY THEY ARE NEEDED
+
+- Location (Always / background):
+  The app writes the capture location into photographs as they are imported. A
+  photographer typically locks the phone and puts it in a pocket between frames,
+  which can be many minutes apart, so a foreground-only authorisation would leave
+  gaps in the record and produce photographs with missing or stale coordinates.
+  Background location is used solely to keep that positional log continuous.
+  Location data never leaves the device except when the user explicitly sends it
+  to their own copy of the companion Mac app over the local network.
+  The feature is off by default in the sense that no location is read unless the
+  user turns logging on in the app.
+
+- Photo library (add only):
+  To save imported photographs.
+
+- Local network / Bonjour (_tethr._tcp):
+  To discover the user's own Mac running the companion desktop app, so that a
+  location log can be handed over for embedding into RAW files stored there. This
+  is a direct device-to-device connection; no external server is contacted.
+
+- Camera usage description:
+  Required for access to the attached external camera device.
+
+PRIVACY
+
+The app collects nothing. There are no analytics, no advertising identifiers, and
+no third-party SDKs of any kind. Its privacy manifest declares no collected data
+types and no tracking.
+
+CONTACT
+
+hina0902suzuki@icloud.com — happy to answer any question or supply additional
+footage if something in the video is unclear.

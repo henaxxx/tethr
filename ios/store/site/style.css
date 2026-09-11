@@ -1,0 +1,188 @@
+/* Tethr — 共通スタイル
+   暗い背景に、アイコンの絞り羽根から取った琥珀色。写真の道具らしい落ち着き。 */
+
+:root {
+  --bg:        #0d0d0f;
+  --surface:   #16161a;
+  --surface-2: #1d1d22;
+  --line:      #292930;
+  --text:      #eae7e2;
+  --dim:       #918d87;
+  --dimmer:    #63605c;
+  --accent:    #d8a341;
+  --accent-lo: #6b5323;
+
+  --sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+          "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  --page:  56rem;
+  --prose: 40rem;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 16px/1.85 var(--sans);
+  letter-spacing: .01em;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 背景に、絞りの光のような淡いグラデーションを一枚 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(60rem 40rem at 50% -10rem, rgba(216,163,65,.07), transparent 70%),
+    radial-gradient(40rem 30rem at 100% 100%, rgba(216,163,65,.03), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.wrap { position: relative; z-index: 1; }
+
+a { color: var(--text); text-decoration-color: var(--accent-lo); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--accent); }
+
+/* ── ヘッダ ───────────────────────────── */
+header.bar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 1rem;
+  padding: .85rem clamp(1.25rem, 5vw, 2.5rem);
+  background: rgba(13,13,15,.78);
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
+  border-bottom: 1px solid var(--line);
+}
+header.bar .home { display: flex; align-items: center; gap: .6rem; text-decoration: none; }
+header.bar img { width: 26px; height: 26px; border-radius: 6px; display: block; }
+header.bar .name { font-weight: 600; letter-spacing: .02em; }
+header.bar nav { margin-left: auto; display: flex; align-items: center; gap: clamp(.9rem, 3vw, 1.6rem); }
+header.bar nav a { font-size: .875rem; color: var(--dim); text-decoration: none; }
+header.bar nav a:hover { color: var(--text); }
+
+.langtoggle {
+  font: inherit; font-size: .78rem; letter-spacing: .06em;
+  background: transparent; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 100px;
+  padding: .22rem .7rem; cursor: pointer;
+}
+.langtoggle:hover { color: var(--accent); border-color: var(--accent-lo); }
+
+/* ── 版面 ─────────────────────────────── */
+main { padding: 0 clamp(1.25rem, 5vw, 2.5rem) 8rem; }
+.page  { max-width: var(--page);  margin: 0 auto; }
+.prose { max-width: var(--prose); margin: 0 auto; }
+
+/* ── ヒーロー ─────────────────────────── */
+.hero { padding: clamp(3.5rem, 11vw, 7rem) 0 clamp(2.5rem, 7vw, 4.5rem); text-align: center; }
+.hero img.mark {
+  width: 104px; height: 104px; border-radius: 24px; display: block; margin: 0 auto 1.75rem;
+  box-shadow: 0 1px 0 rgba(255,255,255,.07) inset, 0 18px 50px -14px rgba(0,0,0,.9);
+}
+.hero h1 {
+  margin: 0 0 .5rem;
+  font-size: clamp(2.6rem, 8vw, 3.9rem); font-weight: 600;
+  letter-spacing: -.025em; line-height: 1.05;
+}
+.hero .tag { margin: 0 auto; max-width: 30rem; color: var(--dim); font-size: clamp(1rem, 2.6vw, 1.1rem); }
+
+/* ── プラットフォームのカード ───────────── */
+.platforms { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; margin: 3rem 0 0; }
+@media (max-width: 40rem) { .platforms { grid-template-columns: 1fr; } }
+
+.card {
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+  border: 1px solid var(--line); border-radius: 16px;
+  padding: 1.6rem 1.5rem 1.4rem;
+  display: flex; flex-direction: column; gap: .45rem;
+}
+.card img { width: 46px; height: 46px; border-radius: 11px; margin-bottom: .4rem; }
+.card h3 { margin: 0; font-size: 1.05rem; font-weight: 600; letter-spacing: 0; }
+.card p  { margin: 0; color: var(--dim); font-size: .9rem; line-height: 1.7; flex: 1; }
+.card .req { color: var(--dimmer); font-size: .8rem; font-variant-numeric: tabular-nums; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: .45rem;
+  margin-top: 1rem; padding: .62rem 1.1rem;
+  border-radius: 10px; font-size: .9rem; font-weight: 500; text-decoration: none;
+  background: var(--accent); color: #1a1206; border: 1px solid transparent;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; color: var(--dim); border-color: var(--line); cursor: default; }
+.btn.ghost:hover { filter: none; }
+
+/* ── セクション ───────────────────────── */
+section { padding: clamp(3rem, 8vw, 5rem) 0 0; }
+h2.sec {
+  margin: 0 0 2rem; font-size: .8rem; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--accent);
+}
+h3.sub { margin: 2.5rem 0 .75rem; font-size: 1.15rem; font-weight: 600; letter-spacing: -.01em; }
+
+.feat { display: grid; gap: 1.6rem 2.5rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+.feat h4 { margin: 0 0 .3rem; font-size: .97rem; font-weight: 600; }
+.feat p  { margin: 0; color: var(--dim); font-size: .9rem; line-height: 1.75; }
+
+/* ── 図 ───────────────────────────────── */
+.diagram { margin: 0 auto; display: block; max-width: 34rem; width: 100%; color: var(--dim); }
+.diagram .accent { color: var(--accent); }
+.caption { text-align: center; color: var(--dimmer); font-size: .82rem; margin-top: .9rem; }
+
+/* ── 表 ───────────────────────────────── */
+.spec { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.spec th, .spec td { text-align: left; padding: .7rem .2rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.spec th { color: var(--dim); font-weight: 400; width: 11rem; }
+@media (max-width: 34rem) { .spec th { width: 7.5rem; } }
+
+/* ── 注記 ─────────────────────────────── */
+.note {
+  border-left: 2px solid var(--accent-lo);
+  padding: .1rem 0 .1rem 1.1rem; margin: 1.4rem 0;
+  color: var(--dim); font-size: .9rem;
+}
+
+code {
+  font: .88em var(--mono); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 5px; padding: .08em .38em;
+}
+
+/* ── 文書ページ ───────────────────────── */
+.doc h1 { font-size: clamp(1.8rem, 5vw, 2.3rem); font-weight: 600; letter-spacing: -.02em; margin: 0 0 .4rem; }
+.doc .updated { color: var(--dimmer); font-size: .85rem; margin: 0 0 3rem; }
+.doc h2 { font-size: 1.02rem; font-weight: 600; margin: 2.8rem 0 .6rem; }
+.doc p, .doc li { color: #cfccc7; }
+.doc ul { padding-left: 1.2rem; }
+.doc li { margin: .3rem 0; }
+.doc { padding-top: clamp(3rem, 8vw, 4.5rem); }
+
+/* ── フッタ ───────────────────────────── */
+footer.site {
+  border-top: 1px solid var(--line);
+  margin-top: clamp(4rem, 10vw, 7rem); padding: 2.5rem clamp(1.25rem, 5vw, 2.5rem) 4rem;
+  color: var(--dimmer); font-size: .85rem;
+}
+footer.site .inner { max-width: var(--page); margin: 0 auto; display: flex; flex-wrap: wrap; gap: .6rem 1.5rem; align-items: center; }
+footer.site a { color: var(--dim); text-decoration: none; }
+footer.site a:hover { color: var(--text); }
+footer.site .copy { margin-left: auto; }
+
+/* ── 言語切替 ─────────────────────────── */
+/* ルート要素の目印は lang-en。.en / .ja と衝突させないこと
+   （html に .en を付けると html 自身が display:none になる） */
+.en { display: none; }
+html.lang-en .en { display: revert; }
+html.lang-en .ja { display: none; }
+
+/* ── 日本語の調整 ─────────────────────── */
+/* 見出しの字間は欧文向けの値なので、日本語では詰める */
+html:not(.lang-en) h2.sec { letter-spacing: .1em; }
+
+/* 文節で折り返す。日本語の途中改行を防ぐ */
+.hero .tag, .caption, .card p, .feat p, .note { word-break: auto-phrase; }

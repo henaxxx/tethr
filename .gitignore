@@ -1,0 +1,39 @@
+# ── ビルド成果物 ───────────────────────
+.build/
+build/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+*.ipa
+*.dSYM/
+
+# 生成される Info.plist（project.yml から xcodegen が作る）
+ios/Info.plist
+probe/Info.plist
+
+# make-icon のコンパイル済みバイナリ
+mac/Resources/make-icon
+
+# ── 同梱される第三者のバイナリ ─────────
+# libgphoto2 / exiftool を取り込んだ配布用バンドル。
+# bundle-libs.sh が Homebrew から組み立てるので、リポジトリには置かない。
+mac/Tethr.app/
+*.zip
+
+# ── 認証情報・個人情報 ─────────────────
+# Apple の審査チーム宛の連絡先（氏名・電話番号・メール）。
+# 各自で用意すること。README を参照。
+ios/fastlane/metadata/review_information/
+
+# App Store Connect API キーは ~/.appstoreconnect/ に置く。念のため。
+*.p8
+AuthKey_*
+
+# Cloudflare のアカウントキャッシュ
+.wrangler/
+
+# ── 雑多 ───────────────────────────────
+.DS_Store
+ios/fastlane/report.xml
+ios/fastlane/test_output/
+ios/fastlane/Preview.html

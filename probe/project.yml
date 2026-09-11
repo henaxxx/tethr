@@ -1,0 +1,30 @@
+name: TethrProbe
+options:
+  bundleIdPrefix: app.tethr
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  TethrProbe:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: TethrProbe
+        # ImageCaptureCore で外部カメラに触れるには、この説明文が必須
+        NSCameraUsageDescription: 接続したカメラを検出し、撮影済みの写真を読み込むために使用します。
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.tethr.TethrProbe
+        DEVELOPMENT_TEAM: UJKL472BK5
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"

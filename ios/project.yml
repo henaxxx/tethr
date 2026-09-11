@@ -1,0 +1,41 @@
+name: TethrTouch
+options:
+  bundleIdPrefix: app.tethr
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  TethrTouch:
+    type: application
+    platform: iOS
+    sources: [Sources, Resources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Tethr
+        ITSAppUsesNonExemptEncryption: false
+        CFBundleDevelopmentRegion: ja
+        CFBundleLocalizations: [ja, en]
+        NSCameraUsageDescription: 接続したカメラを検出し、撮影した写真を読み込むために使用します。
+        NSPhotoLibraryAddUsageDescription: 取り込んだ写真を写真アプリへ保存するために使用します。
+        NSLocationWhenInUseUsageDescription: 撮影したカットに撮影地点を記録するために使用します。
+        NSLocationAlwaysAndWhenInUseUsageDescription: 撮影の合間に画面を消していても、軌跡を切らさず記録するために使用します。
+        NSLocalNetworkUsageDescription: 同じネットワーク上の Mac 版 Tethr を見つけて、位置情報を送るために使用します。
+        NSBonjourServices:
+          - _tethr._tcp
+        UIBackgroundModes:
+          - location
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.tethr.TethrTouch
+        DEVELOPMENT_TEAM: UJKL472BK5
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"

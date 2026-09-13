@@ -125,9 +125,14 @@ final class LiveViewController: ObservableObject {
                 // （禁止条件 0x00000001）。それは呼び出し側が SDRAM に切り替えて再試行する
                 let condition = await readProhibitCondition()
                 await logWithState("ライブビュー: 開始命令を拒否された \(PTP.responseName(code))（\(attempt) 回目）")
+                guard let condition, attempt < 8 else { return false }
+                if condition & 1 != 0 {
+                    // 記録先がカード。SDRAM で開いている最中なら、撮り終えたカメラが自分でカードに戻したので切り替え直す
+                    guard switchedToSDRAM else { return false }
+                    try? await writeMedia(sdram: true)
+                }
                 // 撮影後の書き込み中（ビット 15）や、理由が出ていないだけのときは少し待てば通ることがある
-                let settling = condition.map { $0 & ~(1 << 15) == 0 } ?? false
-                guard settling, attempt < 8 else { return false }
+                guard condition & ~((1 << 15) | 1) == 0 else { return false }
                 try? await Task.sleep(for: .milliseconds(500))
                 await s.waitUntilReady(seconds: 2)
             }
@@ -198,8 +203,11 @@ final class LiveViewController: ObservableObject {
     /// ライブビューを付けたまま記録先だけカードに戻して切ると、D300 はシャッター音が 3 回鳴り、
     /// 画像が届かず、そのあとライブビューを開始できなくなった。D300 本体もライブビュー中の撮影では
     /// ミラーを下ろすので、止めてから普段どおりに撮るのが一番確実
-    func whileSuspended(_ body: () async -> Void) async {
-        guard state == .on, let s = session else { return await body() }
+    func whileSuspended(_ body: () async -> Bool) async {
+        guard state == .on, let s = session else {
+            _ = await body()
+            return
+        }
         pauseCount += 1
         suspended = true
         defer {
@@ -226,9 +234,23 @@ final class LiveViewController: ObservableObject {
         }
         await logWithState("ライブビュー: 撮影前")
 
-        await body()
+        let before = s.shotNotificationCount
+        let fired = await body()
 
-        // 露光とカードへの書き込みが終わるまでビジーが続く
+        if fired {
+            // 撮り終えるまで待つ。D300 は書き込みの間も DeviceReady は OK のまま開始命令だけを断り
+            // （InvalidStatus・禁止条件 0）、書き終えると記録先を自分でカードに戻す。
+            // 撮影通知（ObjectAdded）が届いてから開き直す
+            let started = Date()
+            let deadline = started.addingTimeInterval(s.captureWaitSeconds)
+            while s.shotNotificationCount == before, Date() < deadline, state == .on, s.isConnected {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            let waited = String(format: "%.1f", Date().timeIntervalSince(started))
+            DebugLog.write(s.shotNotificationCount == before
+                ? "ライブビュー: 撮影通知が \(waited) 秒来ないまま開き直す"
+                : "ライブビュー: 撮影通知まで \(waited) 秒")
+        }
         await s.waitUntilReady(seconds: 60)
         // 撮っている間にボタンやケーブル抜けで止められていたら、開き直さない
         guard state == .on else { return }

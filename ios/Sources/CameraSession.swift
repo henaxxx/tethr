@@ -856,7 +856,27 @@ final class CameraSession: NSObject, ObservableObject {
         await refreshProps()
     }
 
-    private func releaseShutter() async {
+    /// 撮影通知（ObjectAdded）を受けた回数。撮り終えたかどうかの目安
+    var shotNotificationCount: Int { nextShotEventID }
+
+    /// 撮影命令を送ってから撮影通知が届くまで待つ上限。
+    /// 長秒時ノイズ低減では露光と同じ時間だけ処理が続くので、露光時間の 2 倍に余裕を足す
+    var captureWaitSeconds: Double {
+        var exposure = 1.0
+        if let value = props[.nikonExposureTime]?.current {
+            let raw = UInt32(truncatingIfNeeded: value)
+            if raw >= 0xFFFF_FFFD {
+                exposure = 60                      // バルブ・タイム・x200
+            } else if raw & 0xFFFF != 0 {
+                exposure = Double(raw >> 16) / Double(raw & 0xFFFF)
+            }
+        }
+        return 15 + exposure * 2
+    }
+
+    /// シャッターを切る命令がカメラに受け付けられたかを返す
+    @discardableResult
+    private func releaseShutter() async -> Bool {
         // レリーズの前に必ず AF を通す。
         // 操作を増やさずに、実機のシャッター全押しと同じ挙動にする。
         await autofocus()
@@ -866,7 +886,7 @@ final class CameraSession: NSObject, ObservableObject {
             do {
                 try await send(.initiateCapture, params: [0, 0])
                 DebugLog.write("リモートシャッター 0x100E: OK")
-                return
+                return true
             } catch CameraError.ptp(0x2019) where attempt < 5 {
                 // まだ AF やミラーが動いている。libgphoto2 と同じく、落ち着くのを待って同じ命令を送り直す。
                 // ここで別の撮影命令に切り替えると、遅れて両方が効いて何度も切れるおそれがある
@@ -875,18 +895,19 @@ final class CameraSession: NSObject, ObservableObject {
             } catch CameraError.ptp(0x2019) {
                 DebugLog.write("リモートシャッター 0x100E: DeviceBusy が続いたので諦める")
                 lastError = String(localized: "撮影できませんでした: \(describe(CameraError.ptp(0x2019)))")
-                return
+                return false
             } catch {
                 DebugLog.write("リモートシャッター 0x100E 失敗: \(describe(error))")
                 // 標準命令が通らない機種向けに Nikon 独自命令も試す
                 do {
                     try await send(.nikonCapture, params: [0xFFFFFFFF])
                     DebugLog.write("リモートシャッター 0x90C0: OK")
+                    return true
                 } catch {
                     DebugLog.write("リモートシャッター 0x90C0 失敗: \(describe(error))")
                     lastError = String(localized: "撮影できませんでした: \(describe(error))")
+                    return false
                 }
-                return
             }
         }
     }

@@ -1,6 +1,14 @@
 import Foundation
 import CoreLocation
 
+/// 軌跡の間隔の基準。ここに関わる時間はすべてこの 1 つから決める。
+///   - 記録している間は、点と点の間がこれを超えない（立ち止まっている間は LocationProvider が打ち直す）
+///   - 撮影時刻から位置を引くとき、前後の点がこれ以内なら記録中だったとみなす
+///   - 軌跡のファイルへの書き出しもこの間隔
+enum TrackTiming {
+    static let interval: TimeInterval = 5 * 60
+}
+
 struct GeoPoint: Codable, Equatable {
     let time: Date
     let lat: Double
@@ -43,7 +51,6 @@ final class GeoLog: ObservableObject {
     @Published private(set) var shots: [String: GeoPoint] = [:]
     @Published private(set) var track: [GeoPoint] = []
 
-    private var pendingSaves = 0
     private static let filename = "geolog.json"
 
     private static var fileURL: URL {
@@ -74,11 +81,11 @@ final class GeoLog: ObservableObject {
 
     /// 軌跡から、ある時刻にいた場所を見積もる。撮影通知を受け取れなかったカットやカード内のカットに使う。
     ///
-    /// 1. 前後 2 分以内に点があれば、いちばん近い点
-    /// 2. 前後の点の間が 5 分以内なら、その間を埋める（ほぼ動いていなければ近い方の点、動いていれば時間で按分）
-    /// 3. それより空いていたら付けない
+    /// 1. 前後の点の間が 5 分以内なら、その間を埋める（ほぼ動いていなければ近い方の点、動いていれば時間で按分）
+    /// 2. 軌跡の端（記録の始まる前・終わった後）は、端の点から 5 分以内ならその点
+    /// 3. それより離れていたら付けない
     ///
-    /// 空白を埋めてよいのは「記録していたが点が出なかった」ときだけ。立ち止まっている間も 2 分おきに点を打つので
+    /// 空白を埋めてよいのは「記録していたが点が出なかった」ときだけ。立ち止まっている間も 5 分経つ前に点を打つので
     /// （LocationProvider の heartbeat）、5 分を超える空白はアプリが記録していなかった時間になる。
     /// そこを埋めると、家を出てアプリを閉じ、外で撮って帰ってきたカットが家の位置になる
     func estimateLocation(at time: Date) -> CLLocation? {
@@ -92,12 +99,17 @@ final class GeoLog: ObservableObject {
         let before = low > 0 ? track[low - 1] : nil
         let after = low < track.count ? track[low] : nil
 
-        let nearest = [before, after].compactMap { $0 }
-            .min { abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time)) }
-        if let nearest, abs(nearest.time.timeIntervalSince(time)) <= 120 {
-            return nearest.location(at: time)
+        let interval = TrackTiming.interval
+        guard let before, let after else {
+            // 軌跡の端。記録を始める少し前や、閉じる少し前に撮ったカット
+            guard let edge = before ?? after, abs(edge.time.timeIntervalSince(time)) <= interval else { return nil }
+            return edge.location(at: time)
         }
-        guard let before, let after, after.time.timeIntervalSince(before.time) <= 5 * 60 else { return nil }
+        guard after.time.timeIntervalSince(before.time) <= interval else {
+            // 記録していなかった空白。空白の縁のすぐそばで撮ったものだけは、縁の点を使う
+            let edge = time.timeIntervalSince(before.time) <= after.time.timeIntervalSince(time) ? before : after
+            return abs(edge.time.timeIntervalSince(time)) <= interval ? edge.location(at: time) : nil
+        }
         let apart = after.location.distance(from: before.location)
         if apart <= 50 {
             let closer = time.timeIntervalSince(before.time) <= after.time.timeIntervalSince(time) ? before : after
@@ -164,17 +176,16 @@ final class GeoLog: ObservableObject {
     ///
     /// 以前は 20 点溜まるまで書かなかった。立ち止まっていると点がなかなか溜まらず、その間にアプリが
     /// 終了させられると（入れ直し、スワイプで終了、背面での終了）、テザーで確定した位置ごと消えていた。
-    /// 20 点か 1 分のどちらか早い方で書く
+    /// いまは軌跡の間隔（5 分）ごとに書く。カットの位置はその場で、背面に回るときも必ず書くので、
+    /// 突然終了しても失うのは直近 5 分の軌跡まで
     private func scheduleSave() {
-        pendingSaves += 1
-        guard pendingSaves >= 20 || Date().timeIntervalSince(lastSaved) >= 60 else { return }
+        guard Date().timeIntervalSince(lastSaved) >= TrackTiming.interval else { return }
         save()
     }
 
     private var lastSaved = Date()
 
     func save() {
-        pendingSaves = 0
         lastSaved = Date()
         guard let data = payload() else { return }
         try? data.write(to: Self.fileURL, options: .atomic)

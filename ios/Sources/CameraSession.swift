@@ -183,6 +183,7 @@ final class CameraSession: NSObject, ObservableObject {
                 self.geoLog.recordTrack(loc)
             }
         }
+        location.lastRecordedTime = { [weak self] in self?.geoLog.track.last?.time }
         location.onModeChange = { [weak self] mode in
             Task { @MainActor in self?.gpsMode = mode }
         }
@@ -736,7 +737,7 @@ final class CameraSession: NSObject, ObservableObject {
         guard geotagging, let first = geoLog.track.first?.time, let last = geoLog.track.last?.time else { return }
         let shots = cardShots.compactMap { shot in shot.captured.map { (shot, $0.addingTimeInterval(clockDrift ?? 0)) } }
             .sorted { $0.1 < $1.1 }
-        let inRange = shots.filter { $0.1 >= first.addingTimeInterval(-120) && $0.1 <= last.addingTimeInterval(120) }
+        let inRange = shots.filter { $0.1 >= first.addingTimeInterval(-TrackTiming.interval) && $0.1 <= last.addingTimeInterval(TrackTiming.interval) }
         let located = inRange.filter { $0.0.location != nil }.count
         DebugLog.write("カード側の位置: 軌跡の期間内 \(inRange.count) 件中 \(located) 件に付いた（期間外 \(shots.count - inRange.count) 件）")
         let f = DateFormatter()

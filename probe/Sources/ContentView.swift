@@ -7,6 +7,22 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("検証（2026-09-13）") {
+                    Button("制御権とライブビューを検証") {
+                        Task { await probe.verifyControlAndLiveView() }
+                    }
+                    .font(.headline)
+                    .disabled(probe.openedName == nil)
+                    Button(probe.measuring ? "計測中…（約5分、そのまま置いておく）" : "接続速度を計測") {
+                        Task { await probe.measureConnections() }
+                    }
+                    .font(.headline)
+                    .disabled(probe.devices.isEmpty || probe.measuring)
+                    if let img = probe.liveImage {
+                        Image(uiImage: img).resizable().aspectRatio(contentMode: .fit).frame(maxHeight: 200)
+                    }
+                }
+
                 Section("手順") {
                     Button(probe.browsing ? "検出を停止" : "検出を開始") {
                         probe.browsing ? probe.stop() : probe.start()

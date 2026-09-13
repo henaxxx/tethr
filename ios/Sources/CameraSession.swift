@@ -285,12 +285,33 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
-    /// セッションを閉じる。カメラの参照は保つので、同じカメラなら開き直しは一瞬で済む。
+    /// 手で接続を解除した。ケーブルを挿し直すまでは自動でつなぎ直さない
+    @Published private(set) var userDisconnected = false
+    /// つないでいる（あるいは解除した）カメラの機種名
+    var deviceName: String? { camera?.name }
+
+    /// 手で接続を解除する。セッションを閉じるだけでカメラの参照は保つので、
+    /// 同じカメラなら「接続」で一瞬で戻れる（開き直しは 0.1 秒、D300 の実測）。
+    /// ケーブルを挿し直したときは解除を忘れて、いつもどおり自動でつなぐ
     func disconnect() {
-        guard let cam = camera else { return }
-        eventLoop?.cancel()
-        cam.requestCloseSession()
-        state = .idle
+        guard let cam = camera, isConnected, !busy, !userDisconnected else { return }
+        userDisconnected = true
+        Task {
+            // ライブビューは閉じる前に必ず止める。ミラーと記録先を元に戻さないとカードに保存されなくなる
+            if live.isActive { await live.stop(reason: "接続解除") }
+            eventLoop?.cancel()
+            prefetchTask?.cancel()
+            DebugLog.write("接続解除: セッションを閉じる")
+            cam.requestCloseSession(options: nil) { _ in }
+            state = .idle
+        }
+    }
+
+    /// 手で解除した接続を戻す
+    func reconnect() {
+        guard userDisconnected, let cam = camera, !cam.hasOpenSession else { return }
+        userDisconnected = false
+        reopen(cam, reason: "接続")
     }
 
     // MARK: 前面と背面
@@ -335,8 +356,8 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
-    private func reopen(_ cam: ICCameraDevice) {
-        DebugLog.write("前面へ: セッションを開き直す")
+    private func reopen(_ cam: ICCameraDevice, reason: String = "前面へ") {
+        DebugLog.write("\(reason): セッションを開き直す")
         state = .connecting(cam.name ?? "カメラ")
         cam.requestOpenSession()
     }
@@ -353,6 +374,7 @@ final class CameraSession: NSObject, ObservableObject {
     private func readVendor() async {
         guard let data = try? await send(.getDeviceInfo),
               let info = Self.parseDeviceInfo(data) else { return }
+        supportedProperties = info.properties
         var vendor = info.vendor
         // D300 は VendorExtensionID に Microsoft（0x6 = MTP）を名乗る。
         // libgphoto2 も同じ補正をしている（library.c: Manufacturer に "Nikon" があれば Nikon とみなす）
@@ -371,7 +393,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// PTP の DeviceInfo から、メーカー番号とメーカー名を拾う。
     ///   uint16 規格版 / uint32 VendorExtensionID / uint16 拡張版 / 文字列 拡張説明 / uint16 機能モード /
     ///   配列×5（命令・イベント・属性・撮影形式・画像形式）/ 文字列 メーカー名 / …
-    private static func parseDeviceInfo(_ data: Data) -> (vendor: UInt32, manufacturer: String)? {
+    private static func parseDeviceInfo(_ data: Data) -> (vendor: UInt32, manufacturer: String, properties: [UInt16])? {
         let b = [UInt8](data)
         var i = 0
         func u16() -> UInt16? { guard i + 2 <= b.count else { return nil }; defer { i += 2 }; return UInt16(b[i]) | UInt16(b[i + 1]) << 8 }
@@ -387,12 +409,51 @@ final class CameraSession: NSObject, ObservableObject {
             i += n * 2
             return String(decoding: units, as: UTF16.self)
         }
-        func skipArray16() -> Bool { guard let n = u32(), i + Int(n) * 2 <= b.count else { return false }; i += Int(n) * 2; return true }
+        func array16() -> [UInt16]? {
+            guard let n = u32(), i + Int(n) * 2 <= b.count else { return nil }
+            return (0..<Int(n)).compactMap { _ in u16() }
+        }
         guard u16() != nil, let vendor = u32(), u16() != nil, string() != nil, u16() != nil,
-              skipArray16(), skipArray16(), skipArray16(), skipArray16(), skipArray16(),
+              array16() != nil, array16() != nil, let properties = array16(), array16() != nil, array16() != nil,
               let manufacturer = string() else { return nil }
-        return (vendor, manufacturer)
+        return (vendor, manufacturer, properties)
     }
+
+    /// カメラが対応を名乗っているプロパティ（DeviceInfo）
+    private var supportedProperties: [UInt16] = []
+    #if DEBUG
+    private var dumpedProperties = false
+
+    /// 調査用。対応しているプロパティの値をすべてログに残す（起動ごとに 1 回）。
+    /// 電池残量は 0x5001 が 20% 刻みでしか返らないので、本体メニューの「電池チェック」の残量と
+    /// 同じ数字を持つプロパティが他にないか探す
+    private func dumpPropertyValuesOnce() async {
+        guard !dumpedProperties, !supportedProperties.isEmpty else { return }
+        dumpedProperties = true
+        var line: [String] = []
+        for prop in supportedProperties {
+            guard isConnected else { return }
+            let text: String
+            if let d = try? await send(.getDevicePropValue, params: [UInt32(prop)]) {
+                let b = [UInt8](d)
+                if [1, 2, 4].contains(b.count) {
+                    let v = b.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) }
+                    text = "\(v)"
+                } else {
+                    text = "(\(b.count)B)"
+                }
+            } else {
+                text = "×"
+            }
+            line.append(String(format: "%04X=", prop) + text)
+            if line.count == 12 {
+                DebugLog.write("プロパティ値: " + line.joined(separator: " "))
+                line = []
+            }
+        }
+        if !line.isEmpty { DebugLog.write("プロパティ値: " + line.joined(separator: " ")) }
+    }
+    #endif
 
     /// 接続時点のオブジェクト数を数えて、次回の目安として覚えておく
     private func countObjects() async {
@@ -512,6 +573,7 @@ final class CameraSession: NSObject, ObservableObject {
     private func forgetDevice() {
         UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
         live.forget()
+        userDisconnected = false
         camera = nil
         fileIndex = [:]
         connectedAt = nil
@@ -1192,6 +1254,9 @@ extension CameraSession: ICCameraDeviceDelegate {
             self.checkEventUsable = true
             self.startEventPolling()
             await self.refreshProps()
+            #if DEBUG
+            await self.dumpPropertyValuesOnce()
+            #endif
         }
     }
 

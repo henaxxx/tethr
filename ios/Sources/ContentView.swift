@@ -117,6 +117,7 @@ struct StatusHeader: View {
                 Circle().fill(color).frame(width: 8, height: 8)
             }
             Text(text).font(.system(size: 12, weight: .medium)).lineLimit(1)
+            ConnectionButton()
             Spacer(minLength: 6)
             if session.isConnected {
                 // M 以外では振れないので、場所は残したまま透明にする（ヘッダーの他の表示をずらさない）
@@ -161,6 +162,9 @@ struct StatusHeader: View {
             }
             return String(localized: "カードを確認中…")
         }
+        if session.userDisconnected, case .idle = session.state {
+            return String(localized: "\(session.deviceName ?? "カメラ")・未接続")
+        }
         switch session.state {
         case .idle: return String(localized: "未接続")
         case .searching: return String(localized: "カメラを探しています…")
@@ -169,6 +173,39 @@ struct StatusHeader: View {
         case .unauthorized: return String(localized: "設定でカメラへのアクセスを許可してください")
         case .failed(let e): return e
         }
+    }
+}
+
+/// 機種名の右に置く「接続解除」「接続」。カードの確認中は命令が通らないので出さない
+struct ConnectionButton: View {
+    @EnvironmentObject var session: CameraSession
+
+    var body: some View {
+        if session.userDisconnected, case .idle = session.state {
+            pill(String(localized: "接続"), prominent: true) { session.reconnect() }
+        } else if session.isConnected, !session.preparing {
+            pill(String(localized: "接続解除"), prominent: false) { session.disconnect() }
+                .disabled(session.busy)
+        }
+    }
+
+    private func pill(_ title: String, prominent: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(prominent ? Color.white : Color.primary)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background {
+                    if prominent {
+                        Capsule().fill(Color.accentColor)
+                    } else {
+                        Capsule().fill(.quaternary)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
     }
 }
 

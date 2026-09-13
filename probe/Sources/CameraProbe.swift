@@ -33,6 +33,8 @@ final class CameraProbe: NSObject, ObservableObject {
     private var camera: ICCameraDevice?
     /// 接続速度の計測中だけ入る。デリゲートが各段階の時刻を書き込む。
     fileprivate var clock: TrialClock?
+    /// 直前に計測したカメラ。抜き差しでオブジェクトが入れ替わったかを見る
+    fileprivate var lastMeasured: ICCameraDevice?
     @Published private(set) var measuring = false
 
     override init() {
@@ -336,6 +338,12 @@ extension CameraProbe: ICCameraDeviceDelegate {
                 // 計測中は 1 件ごとの記録を出さない（400 行になるため）
                 if c.firstFile == nil { c.firstFile = now.timeIntervalSince(c.t0) }
                 c.files += items.count
+                if !c.baseline.isEmpty {
+                    for n in names where !c.baseline.contains(n) {
+                        c.newNames.append(n)
+                        if c.firstNew == nil { c.firstNew = now.timeIntervalSince(c.t0) }
+                    }
+                }
                 c.lastFile = now.timeIntervalSince(c.t0)
                 return
             }
@@ -548,6 +556,10 @@ final class TrialClock {
     var complete: TimeInterval?
     var files = 0
     var percent: [(TimeInterval, Int)] = []
+    /// 開く前から知っていたファイル名。これに無い名前が「閉じている間に増えた分」
+    var baseline: Set<String> = []
+    var newNames: [String] = []
+    var firstNew: TimeInterval?
     init(label: String) { self.label = label }
     var elapsed: TimeInterval { Date().timeIntervalSince(t0) }
 }
@@ -564,8 +576,10 @@ extension CameraProbe {
     }
 
     /// 開いてから全件の読み込みが終わるまでを 1 回計る
-    private func trial(_ cam: ICCameraDevice, label: String, options: [ICSessionOptions: Any]?) async -> TrialClock {
+    private func trial(_ cam: ICCameraDevice, label: String, options: [ICSessionOptions: Any]?,
+                       baseline: Set<String> = []) async -> TrialClock {
         let c = TrialClock(label: label)
+        c.baseline = baseline
         clock = c
         files = []
         note("── \(label): セッションを開く")
@@ -605,7 +619,49 @@ extension CameraProbe {
                     fmt(c.firstFile), fmt(c.complete), c.files), ok: c.complete != nil)
         let marks = c.percent.map { String(format: "%d%%@%.1f", $0.1, $0.0) }.joined(separator: " ")
         note("   進捗の推移: \(marks)")
+        if !c.baseline.isEmpty {
+            if c.newNames.isEmpty {
+                note("   前回から増えたファイル: なし", ok: nil)
+            } else {
+                note("   前回から増えたファイル: \(c.newNames.count) 件 \(c.newNames.joined(separator: ", "))（最初の到着 \(fmt(c.firstNew))）", ok: true)
+            }
+        }
         return c
+    }
+
+    /// いま見えている中で一番新しいカメラ。抜き差し後は新しいオブジェクトになっているはず
+    private var newestCamera: ICCameraDevice? {
+        devices.compactMap { $0 as? ICCameraDevice }.last ?? camera
+    }
+
+    func closeCurrentSession() async {
+        guard let cam = camera ?? newestCamera else { note("カメラがありません", ok: false); return }
+        let count = files.count
+        await closeSession(cam)
+        openedName = nil
+        note("セッションを閉じました（この時点のファイル \(count) 件）。カメラで撮ってから「1回だけ開いて計測」", ok: true)
+    }
+
+    /// 開いたままにする 1 回だけの計測。閉じている間の撮影、抜き差し、強制終了の後に使う
+    func measureOnce() async {
+        guard let cam = newestCamera else { note("先に「検出を開始」してください", ok: false); return }
+        measuring = true
+        defer { measuring = false }
+        let same = lastMeasured.map { $0 === cam } ?? false
+        note("===== 1回だけ開いて計測 =====")
+        note("   カメラ: \(cam.name ?? "?") / UUID \(cam.uuidString ?? "?") / 前回と\(lastMeasured == nil ? "比較なし（このプロセスで初回）" : same ? "同じオブジェクト" : "別のオブジェクト")")
+        let baseline = Set(files)
+        camera = cam
+        cam.delegate = self
+        if cam.hasOpenSession {
+            note("   開いているので一度閉じます")
+            await closeSession(cam)
+            try? await Task.sleep(for: .seconds(2))
+        }
+        _ = await trial(cam, label: "1回計測", options: nil, baseline: baseline)
+        lastMeasured = cam
+        openedName = cam.name
+        note("===== 計測終了（セッションは開いたまま） =====")
     }
 
     /// 同じカメラにつなぎ直しを繰り返し、待ちが初回だけか、指定で変わるかを見る

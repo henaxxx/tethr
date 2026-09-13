@@ -18,6 +18,11 @@ struct ContentView: View {
                     }
                     .font(.headline)
                     .disabled(probe.devices.isEmpty || probe.measuring)
+                    Button("① セッションを閉じる") { Task { await probe.closeCurrentSession() } }
+                        .disabled(probe.measuring)
+                    Button(probe.measuring ? "計測中…" : "② 1回だけ開いて計測") { Task { await probe.measureOnce() } }
+                        .font(.headline)
+                        .disabled(probe.devices.isEmpty || probe.measuring)
                     if let img = probe.liveImage {
                         Image(uiImage: img).resizable().aspectRatio(contentMode: .fit).frame(maxHeight: 200)
                     }

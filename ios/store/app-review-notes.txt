@@ -39,6 +39,19 @@ PERMISSIONS AND WHY THEY ARE NEEDED
   The feature is off by default in the sense that no location is read unless the
   user turns logging on in the app.
 
+- Motion & Fitness:
+  Used only to tell whether the user is standing still. While they are, GPS is
+  switched off and the last precise position is kept, since a photographer
+  standing still to shoot has not moved. This is the main battery saving for
+  shooting with the phone in a pocket. Motion data is not stored or sent.
+
+- Proximity sensor (no permission prompt):
+  With a camera connected, covering the sensor (the phone going into a pocket)
+  lets iOS turn the screen off while the app stays in the foreground, so
+  capture events and locations keep being recorded. Auto-lock is suspended
+  only while the sensor is covered. This can be turned off in the location
+  settings sheet.
+
 - Photo library (add only):
   To save imported photographs.
 

@@ -8,6 +8,14 @@ struct GeoPanel: View {
     @State private var confirmingClear = false
     @StateObject private var sender = GeoSender()
 
+    private var gpsText: String {
+        switch session.gpsMode {
+        case .off: return String(localized: "オフ")
+        case .precise: return String(localized: "測位中")
+        case .holding: return String(localized: "止めています（立ち止まり中）")
+        }
+    }
+
     private var hasNothingToSend: Bool {
         session.geoLog.shots.isEmpty && session.geoLog.track.isEmpty
     }
@@ -23,7 +31,16 @@ struct GeoPanel: View {
                     Text("カメラのカードには書き込めないため、位置は端末側に控えます。取り込むときに写真へ付き、RAW 本体には手を触れません。")
                 }
 
+                Section {
+                    Toggle("ポケットに入れたら省電力", isOn: $session.pocketModeEnabled)
+                } footer: {
+                    Text("カメラをつないだまま iPhone をポケットに入れると画面を消し、露出計の問い合わせとサムネイルの取得を止めます。ポケットの中では自動ロックしないので、撮影通知と位置の記録は続きます。取り出すと、中で撮ったカットを全画面で出します。")
+                }
+
                 Section("記録の状況") {
+                    LabeledContent("GPS") {
+                        Text(gpsText).foregroundStyle(.secondary)
+                    }
                     LabeledContent("正確な位置") {
                         Text("\(session.geoLog.shots.count) カット").monospacedDigit()
                     }

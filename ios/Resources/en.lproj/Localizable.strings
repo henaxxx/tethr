@@ -85,3 +85,8 @@
 "カメラが取り外されました" = "Camera disconnected";
 "カードを確認中…" = "Checking the card…";
 "カードを確認中（%lld 件・約 %lld 秒）" = "Checking the card (%lld files, about %lld s)";
+"ポケットに入れたら省電力" = "Save power in your pocket";
+"カメラをつないだまま iPhone をポケットに入れると画面を消し、露出計の問い合わせとサムネイルの取得を止めます。ポケットの中では自動ロックしないので、撮影通知と位置の記録は続きます。取り出すと、中で撮ったカットを全画面で出します。" = "With the camera connected, putting your iPhone in a pocket turns the screen off and stops polling the meter and fetching thumbnails. It does not lock in your pocket, so shots are still noticed and locations still recorded. Take it out and the frames you shot are shown full screen.";
+"オフ" = "Off";
+"測位中" = "Tracking";
+"止めています（立ち止まり中）" = "Paused (standing still)";

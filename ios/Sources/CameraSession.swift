@@ -20,7 +20,9 @@ enum LinkState: Equatable {
 @MainActor
 final class CameraSession: NSObject, ObservableObject {
 
-    @Published private(set) var state: LinkState = .idle
+    @Published private(set) var state: LinkState = .idle {
+        didSet { updatePocketWatch() }
+    }
     /// 接続中に撮ったカット。テザー撮影の主役はこちら。
     @Published private(set) var liveShots: [Shot] = []
     /// 接続前からカードにあったカット。見たい人だけが見る。
@@ -86,7 +88,16 @@ final class CameraSession: NSObject, ObservableObject {
     private var deliveredNames: Set<String> = []
     /// 撮影の瞬間に届いた ObjectAdded の時刻と位置。古い順。
     /// セッションを閉じていても届く（実機で確認）ので、撮影地点の一番の手がかりになる
-    private var shotEvents: [(time: Date, location: CLLocation?)] = []
+    private var shotEvents: [ShotEvent] = []
+    private struct ShotEvent {
+        let id: Int
+        let time: Date
+        /// 衛星が止まっていた等で精密な位置がまだ無ければ nil。取れたら埋める
+        var location: CLLocation?
+    }
+    private var nextShotEventID = 0
+    /// 位置が後から届く撮影通知と、それに対応づいたカット名
+    private var fixTargets: [Int: String] = [:]
     /// フレームワークが完了を告げたか。これだけでは完了とみなさない
     private var frameworkCatalogDone = false
     private var catalogSettle: Task<Void, Never>?
@@ -109,6 +120,32 @@ final class CameraSession: NSObject, ObservableObject {
     private let location = LocationProvider()
     let geoLog = GeoLog()
 
+    // MARK: ポケット
+    //
+    // カメラをつないだまま iPhone をポケットに入れて撮る使い方のための省電力。
+    // 近接センサで画面を消し、アプリは前面のまま、撮影通知と位置の記録だけを続ける。
+    // 背面レビューは USB 接続中の D300 では出せないので、取り出した瞬間に最新カットを全画面で出す。
+
+    /// ポケットに入っていて画面が消えている
+    @Published private(set) var pocketed = false
+    /// ポケットの中で撮ったカットがあれば、取り出したときに全画面で出す
+    @Published var reviewOnReturn: Shot.ID?
+    /// ポケット検知を使うか
+    @Published var pocketModeEnabled = true {
+        didSet {
+            UserDefaults.standard.set(pocketModeEnabled, forKey: "pocketMode")
+            updatePocketWatch()
+        }
+    }
+    /// いま衛星で測っているか。設定画面に出す
+    @Published private(set) var gpsMode: LocationProvider.Mode = .off
+    private let pocket = PocketDetector()
+    private var appActive = true
+    private var shotsWhilePocketed = 0
+    /// ポケットの中で取らずにおいたサムネイル
+    private var deferredThumbnails: Set<String> = []
+    private var prefetchTask: Task<Void, Never>?
+
     /// 一覧に出す設定の並び
     static let displayed: [PTP.Prop] = [.exposureProgram, .exposureTime, .fNumber, .iso, .exposureBias]
     /// スクラバーで操作する設定
@@ -129,6 +166,64 @@ final class CameraSession: NSObject, ObservableObject {
                 guard let self, self.geotagging else { return }
                 self.geoLog.recordTrack(loc)
             }
+        }
+        location.onModeChange = { [weak self] mode in
+            Task { @MainActor in self?.gpsMode = mode }
+        }
+        pocketModeEnabled = UserDefaults.standard.object(forKey: "pocketMode") as? Bool ?? true
+        pocket.onChange = { [weak self] value in self?.pocketChanged(value) }
+    }
+
+    private func updatePocketWatch() {
+        pocket.active = pocketModeEnabled && isConnected && appActive
+    }
+
+    private func pocketChanged(_ value: Bool) {
+        pocketed = value
+        if value {
+            shotsWhilePocketed = 0
+            return
+        }
+        // 取り出した。止めていたものを戻す
+        let names = deferredThumbnails
+        deferredThumbnails = []
+        for shot in liveShots + cardShots where names.contains(shot.name) {
+            requestThumbnail(for: shot)
+        }
+        Task { await refreshProps() }
+        if shotsWhilePocketed > 0, let newest = liveShots.first {
+            DebugLog.write("取り出し: ポケット中に \(shotsWhilePocketed) カット。最新を全画面へ")
+            browsingCard = false
+            selection = newest.id
+            reviewOnReturn = newest.id
+        }
+        shotsWhilePocketed = 0
+    }
+
+    /// ポケットの中で撮られたら、撮影が 3 秒途切れたところで最新 1 枚のプレビューだけ取っておく。
+    /// 取り出してから転送を待たせないため。連写中は 1 枚ごとに取らない
+    private func schedulePrefetch() {
+        prefetchTask?.cancel()
+        prefetchTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard let self, !Task.isCancelled, self.pocketed, let newest = self.liveShots.first else { return }
+            DebugLog.write("最新カットのプレビューを先読み: \(newest.name)")
+            self.requestPreview(for: newest)
+        }
+    }
+
+    /// 撮影通知に対して、精密な位置が後から取れた
+    private func applyShotFix(id: Int, _ fix: CLLocation?) {
+        guard let fix else {
+            fixTargets[id] = nil
+            return
+        }
+        if let i = shotEvents.firstIndex(where: { $0.id == id }) {
+            shotEvents[i].location = fix
+        } else if let name = fixTargets.removeValue(forKey: id) {
+            if let i = liveShots.firstIndex(where: { $0.name == name }) { liveShots[i].location = fix }
+            geoLog.recordShot(name, at: fix)
+            DebugLog.write("位置を後から確定: \(name) 精度 \(Int(fix.horizontalAccuracy))m")
         }
     }
 
@@ -182,6 +277,9 @@ final class CameraSession: NSObject, ObservableObject {
     /// 次の接続で 20〜36 秒待たされる。行儀よく閉じておけば 7 秒で済む。
     /// 同じカメラのままなら、開き直しは 0.1 秒（いずれも D300 の実測）。
     func appDidEnterBackground() {
+        appActive = false
+        updatePocketWatch()
+        location.appDidEnterBackground()
         guard let cam = camera, cam.hasOpenSession else { return }
         closedForBackground = true
         eventLoop?.cancel()
@@ -196,6 +294,9 @@ final class CameraSession: NSObject, ObservableObject {
     }
 
     func appDidBecomeActive() {
+        appActive = true
+        updatePocketWatch()
+        location.appDidBecomeActive()
         guard closedForBackground, let cam = camera else { return }
         closedForBackground = false
         if cam.hasOpenSession {
@@ -242,7 +343,7 @@ final class CameraSession: NSObject, ObservableObject {
     }
 
     /// 撮影通知のうち、このカットのものを取り出す。時計のずれと転送の遅れぶんは許す
-    private func takeShotEvent(near taken: Date) -> (time: Date, location: CLLocation?)? {
+    private func takeShotEvent(near taken: Date) -> ShotEvent? {
         let tolerance = abs(clockDrift ?? 0) + 5
         guard let i = shotEvents.firstIndex(where: { abs($0.time.timeIntervalSince(taken)) <= tolerance }) else { return nil }
         let event = shotEvents[i]
@@ -274,6 +375,8 @@ final class CameraSession: NSObject, ObservableObject {
             for (var shot, _) in live {
                 if geotagging {
                     let event = shot.captured.flatMap(takeShotEvent(near:))
+                    // 精密な位置がまだ取れていなければ、取れたときにこのカットへ入れる
+                    if let event, event.location == nil { fixTargets[event.id] = shot.name }
                     let here = event?.location
                         ?? geoLog.shots[shot.name]?.location
                         ?? shot.captured.flatMap { geoLog.location(near: $0) }
@@ -291,6 +394,10 @@ final class CameraSession: NSObject, ObservableObject {
             liveShots.insert(contentsOf: added.reversed(), at: 0)
             selection = liveShots.first?.id
             for shot in added { requestThumbnail(for: shot) }
+            if pocketed {
+                shotsWhilePocketed += added.count
+                schedulePrefetch()
+            }
         }
         if !card.isEmpty {
             cardShots.append(contentsOf: card)
@@ -338,6 +445,9 @@ final class CameraSession: NSObject, ObservableObject {
         expectedObjects = nil
         deliveredNames = []
         shotEvents = []
+        fixTargets = [:]
+        deferredThumbnails = []
+        prefetchTask?.cancel()
         preparing = false
         frameworkCatalogDone = false
         catalogSettle?.cancel()
@@ -412,7 +522,7 @@ final class CameraSession: NSObject, ObservableObject {
 
             guard isConnected else { return }
             // 画面が見えていない、撮影中、転送中は叩かない
-            guard !suspended, !busy, transferCount == 0 else { continue }
+            guard !suspended, !pocketed, !busy, transferCount == 0 else { continue }
 
             let changed = await pollOnce()
             quiet = changed ? 0 : quiet + 1
@@ -607,6 +717,10 @@ final class CameraSession: NSObject, ObservableObject {
     /// 一括で要求すると 1 枚ごとに PTP の往復が走り、USB 2.0 が飽和して
     /// 他の操作まで待たされる。表示に必要な分だけ、遅延で取る。
     func requestThumbnail(for shot: Shot) {
+        if pocketed {
+            deferredThumbnails.insert(shot.name)
+            return
+        }
         guard shot.thumbnail == nil, !thumbnailRequested.contains(shot.name),
               let file = fileIndex[shot.name] else { return }
         thumbnailRequested.insert(shot.name)
@@ -887,11 +1001,21 @@ extension CameraSession: ICCameraDeviceDelegate {
             switch code {
             case 0x4002:
                 // ObjectAdded。撮った瞬間に届くので、この時点の位置が撮影地点になる
-                self.shotEvents.append((Date(), self.geotagging ? self.location.current : nil))
+                let id = self.nextShotEventID
+                self.nextShotEventID += 1
+                self.shotEvents.append(ShotEvent(id: id, time: Date(), location: nil))
                 if self.shotEvents.count > 200 { self.shotEvents.removeFirst(self.shotEvents.count - 200) }
+                if self.geotagging {
+                    // 立ち止まって衛星を止めていれば保持している位置がすぐ返り、無ければ衛星を起こして取る
+                    self.location.fixForShot { [weak self] fix in
+                        Task { @MainActor in self?.applyShotFix(id: id, fix) }
+                    }
+                }
                 DebugLog.write("撮影通知 handle=\(param.map { String(format: "0x%08X", $0) } ?? "?")")
             case 0x400D:
-                // CaptureComplete。撮影直後は設定が変わっていることがあるので読み直す
+                // CaptureComplete。撮影直後は設定が変わっていることがあるので読み直す。
+                // ポケットの中では誰も見ていないので、取り出したときにまとめて読む
+                guard !self.pocketed else { return }
                 await self.refreshProps()
             default:
                 break

@@ -31,6 +31,13 @@ struct ContentView: View {
             ReviewView().environmentObject(session)
         }
         .environment(\.openReview, { reviewing = true })
+        // ポケットから取り出したとき、中で撮ったカットがあれば最新を全画面で出す。
+        // 背面液晶のレビューは USB でつないでいる間は出ないので、その代わり
+        .onChange(of: session.reviewOnReturn) { _, id in
+            guard id != nil else { return }
+            reviewing = true
+            session.reviewOnReturn = nil
+        }
         .task {
             if case .idle = session.state { session.start() }
         }

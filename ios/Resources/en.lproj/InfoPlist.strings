@@ -1,0 +1,7 @@
+/* 権限を求めるときの説明文。日本語は project.yml の Info.plist 側にある */
+"NSCameraUsageDescription" = "Used to detect the connected camera and read the photos you take.";
+"NSPhotoLibraryAddUsageDescription" = "Used to save imported photos to your photo library.";
+"NSLocationWhenInUseUsageDescription" = "Used to record where each photo was taken.";
+"NSLocationAlwaysAndWhenInUseUsageDescription" = "Used to keep the track going while the screen is off between shots.";
+"NSLocalNetworkUsageDescription" = "Used to find Tethr for Mac on the same network and send it your location record.";
+"NSMotionUsageDescription" = "Used to tell whether you are standing still, so GPS runs only when it is needed and saves battery. This is worked out on your iPhone and never sent anywhere.";

@@ -20,6 +20,7 @@ targets:
         NSLocationWhenInUseUsageDescription: 撮影したカットに撮影地点を記録するために使用します。
         NSLocationAlwaysAndWhenInUseUsageDescription: 撮影の合間に画面を消していても、軌跡を切らさず記録するために使用します。
         NSLocalNetworkUsageDescription: 同じネットワーク上の Mac 版 Tethr を見つけて、位置情報を送るために使用します。
+        NSMotionUsageDescription: 立ち止まっているかどうかを判定し、GPS を必要なときだけ動かして電池を節約するために使用します。判定は端末内だけで行い、どこにも送信しません。
         NSBonjourServices:
           - _tethr._tcp
         UIBackgroundModes:
@@ -27,8 +28,6 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
-          - UIInterfaceOrientationLandscapeLeft
-          - UIInterfaceOrientationLandscapeRight
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.tethr.TethrTouch

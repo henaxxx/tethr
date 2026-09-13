@@ -42,7 +42,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// （D300 で確認。半押しで変わるのは 0x500D だけで、0xD1B1 は動かなかった）。
     /// 出しっぱなしにすると壊れているように見えるので、M 以外では隠す。
     var lightMeterMeaningful: Bool {
-        props[.exposureProgram]?.current == 1   // PTP の ExposureProgramMode: 1 = Manual
+        props[.exposureProgram]?.current == 1 && lightMeterAvailable   // PTP の ExposureProgramMode: 1 = Manual
     }
     /// 撮影地点を記録するか。カメラ側には書けないので、
     /// 取り込み時に写真アプリへ渡す形で残す。
@@ -285,6 +285,22 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
+    /// DeviceInfo から分かる、このカメラが受け付ける命令とプロパティ。読むまでは nil
+    @Published private(set) var capabilities: CameraCapabilities?
+    /// 送らずに断った命令。ログを 1 回ずつにする
+    private var refusalsLogged: Set<String> = []
+
+    /// ライブビューを出せるか。Nikon 1 はまだ手順を確かめていない（J1 は開始命令自体を名乗っていない）
+    var supportsLiveView: Bool {
+        PropFormat.vendor == PropFormat.vendorNikon && capabilities?.isNikon1 != true
+    }
+
+    /// 露出計（Nikon 0xD1B1）を読めるか
+    var lightMeterAvailable: Bool {
+        guard let caps = capabilities, caps.isNikon1 else { return true }
+        return caps.properties.contains(UInt16(Self.lightMeterProp))
+    }
+
     /// 手で接続を解除した。ケーブルを挿し直すまでは自動でつなぎ直さない
     @Published private(set) var userDisconnected = false
     /// つないでいる（あるいは解除した）カメラの機種名
@@ -405,6 +421,14 @@ final class CameraSession: NSObject, ObservableObject {
         guard let data = try? await send(.getDeviceInfo),
               let info = Self.parseDeviceInfo(data) else { return }
         supportedProperties = info.properties
+        capabilities = CameraCapabilities(info)
+        #if DEBUG
+        func hex(_ codes: [UInt16]) -> String { codes.map { String(format: "%04X", $0) }.joined(separator: " ") }
+        DebugLog.write("DeviceInfo: \(info.manufacturer) \(info.model)\(capabilities?.isNikon1 == true ? "（Nikon 1）" : "")")
+        DebugLog.write("DeviceInfo 命令: " + hex(info.operations))
+        DebugLog.write("DeviceInfo イベント: " + hex(info.events))
+        DebugLog.write("DeviceInfo プロパティ: " + hex(info.properties))
+        #endif
         var vendor = info.vendor
         // D300 は VendorExtensionID に Microsoft（0x6 = MTP）を名乗る。
         // libgphoto2 も同じ補正をしている（library.c: Manufacturer に "Nikon" があれば Nikon とみなす）
@@ -420,10 +444,19 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
-    /// PTP の DeviceInfo から、メーカー番号とメーカー名を拾う。
+    /// PTP の DeviceInfo。
     ///   uint16 規格版 / uint32 VendorExtensionID / uint16 拡張版 / 文字列 拡張説明 / uint16 機能モード /
-    ///   配列×5（命令・イベント・属性・撮影形式・画像形式）/ 文字列 メーカー名 / …
-    private static func parseDeviceInfo(_ data: Data) -> (vendor: UInt32, manufacturer: String, properties: [UInt16])? {
+    ///   配列×5（命令・イベント・属性・撮影形式・画像形式）/ 文字列 メーカー名 / 文字列 機種名 / …
+    struct DeviceInfo {
+        let vendor: UInt32
+        let manufacturer: String
+        let model: String
+        let operations: [UInt16]
+        let events: [UInt16]
+        let properties: [UInt16]
+    }
+
+    private static func parseDeviceInfo(_ data: Data) -> DeviceInfo? {
         let b = [UInt8](data)
         var i = 0
         func u16() -> UInt16? { guard i + 2 <= b.count else { return nil }; defer { i += 2 }; return UInt16(b[i]) | UInt16(b[i + 1]) << 8 }
@@ -444,9 +477,11 @@ final class CameraSession: NSObject, ObservableObject {
             return (0..<Int(n)).compactMap { _ in u16() }
         }
         guard u16() != nil, let vendor = u32(), u16() != nil, string() != nil, u16() != nil,
-              array16() != nil, array16() != nil, let properties = array16(), array16() != nil, array16() != nil,
+              let operations = array16(), let events = array16(), let properties = array16(),
+              array16() != nil, array16() != nil,
               let manufacturer = string() else { return nil }
-        return (vendor, manufacturer, properties)
+        return DeviceInfo(vendor: vendor, manufacturer: manufacturer, model: string() ?? "",
+                          operations: operations, events: events, properties: properties)
     }
 
     /// カメラが対応を名乗っているプロパティ（DeviceInfo）
@@ -461,6 +496,10 @@ final class CameraSession: NSObject, ObservableObject {
         guard !dumpedProperties, !supportedProperties.isEmpty else { return }
         dumpedProperties = true
         var all = supportedProperties
+        if capabilities?.isNikon1 == true {
+            // Nikon 1 は独自プロパティを 0xF000 番台に持つ（libgphoto2 は J5 で 0xF01C まで確認）
+            all += (0xF000...0xF01C).map { UInt16($0) }.filter { !supportedProperties.contains($0) }
+        }
         if let d = try? await send(.nikonGetVendorPropCodes) {
             // uint32 個数 → uint16 の並び
             let b = [UInt8](d)
@@ -638,6 +677,8 @@ final class CameraSession: NSObject, ObservableObject {
         UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
         live.forget()
         userDisconnected = false
+        capabilities = nil
+        refusalsLogged = []
         camera = nil
         fileIndex = [:]
         connectedAt = nil
@@ -869,6 +910,16 @@ final class CameraSession: NSObject, ObservableObject {
     @discardableResult
     func send(_ op: PTP.Op, params: [UInt32] = [], outData: Data? = nil) async throws -> Data {
         guard let cam = camera else { throw CameraError.notConnected }
+        if let caps = capabilities, let refusal = caps.refusal(op, params: params) {
+            // 送らずに断る。Nikon 1 は名乗っていない命令や一部の独自命令で通信ごと固まる
+            let key = "\(op.rawValue)-\(params.first ?? 0)"
+            if !refusalsLogged.contains(key) {
+                refusalsLogged.insert(key)
+                DebugLog.write(String(format: "送らなかった 0x%04X%@: %@", op.rawValue,
+                                      params.first.map { String(format: "(0x%X)", $0) } ?? "", refusal.reason))
+            }
+            throw CameraError.ptp(refusal.code)
+        }
         let label = String(format: "0x%04X", op.rawValue)
         let started = Date()
         let watchdog = Task {
@@ -946,6 +997,10 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
+    fileprivate func refreshPropForEvent(_ prop: PTP.Prop) async {
+        if prop == .exposureProgram { await refreshProps() } else { await refreshProp(prop) }
+    }
+
     /// 1 つの設定だけ読み直す
     private func refreshProp(_ prop: PTP.Prop) async {
         guard let data = try? await send(.getDevicePropDesc, params: [UInt32(prop.rawValue)]),
@@ -1005,7 +1060,8 @@ final class CameraSession: NSObject, ObservableObject {
     private func releaseShutter() async -> Bool {
         // レリーズの前に必ず AF を通す。
         // 操作を増やさずに、実機のシャッター全押しと同じ挙動にする。
-        await autofocus()
+        // Nikon 1 はまず libgphoto2 で通っている手順（標準の 0x100E だけ）に合わせ、AF 命令は確かめてから使う
+        if capabilities?.isNikon1 != true { await autofocus() }
         var attempt = 0
         while true {
             attempt += 1
@@ -1296,6 +1352,9 @@ extension CameraSession: ICCameraDeviceDelegate {
                 self.preparing = true
             }
             if !self.catalogReady { self.startProgressWatch() }
+            // 何を送ってよいかを先に知る。Nikon 1 は名乗っていない命令を送ると通信ごと固まるので、
+            // 時計合わせより前に DeviceInfo を読む（どちらも準備完了まで待たされるのは同じ）
+            if self.capabilities == nil { await self.readVendor() }
             // 時計は準備完了まで読めない。読み終えたら、溜めていたファイルを判定して流す
             await self.syncClock()
             self.preparing = false
@@ -1313,15 +1372,21 @@ extension CameraSession: ICCameraDeviceDelegate {
                 self.ingest(held)
             }
             await self.countObjects()
-            await self.readVendor()
-            if PropFormat.vendor == PropFormat.vendorNikon {
+            if self.capabilities == nil { await self.readVendor() }
+            if self.supportsLiveView {
                 // ライブビュー中にアプリが落ちたりケーブルが抜けたりすると、記録先が SDRAM のまま残り
                 // 本体で撮ってもカードに保存されなくなる。つないだら確かめて戻す
                 await LiveViewController.restoreIfInterrupted(self)
             }
             self.scheduleCatalogSettle()
-            self.checkEventUsable = true
-            self.startEventPolling()
+            // Nikon 1 の V1・J1 などでは CheckEvent (0x90C7) で通信が壊れる（libgphoto2 #569 #716）。
+            // 本体側の変更は USB のイベント（DevicePropChanged）で拾う
+            self.checkEventUsable = self.capabilities?.isNikon1 != true
+            if self.checkEventUsable || self.lightMeterAvailable {
+                self.startEventPolling()
+            } else {
+                DebugLog.write("CheckEvent と露出計の問い合わせは使わない（Nikon 1）")
+            }
             await self.refreshProps()
             #if DEBUG
             await self.dumpPropertyValuesOnce()
@@ -1396,6 +1461,12 @@ extension CameraSession: ICCameraDeviceDelegate {
                     }
                 }
                 DebugLog.write("撮影通知 handle=\(param.map { String(format: "0x%08X", $0) } ?? "?")")
+            case 0x4006:
+                // DevicePropChanged。Nikon 1 のように CheckEvent を使えない機種は、本体側の変更をここで拾う
+                guard let param, !self.checkEventUsable, !self.pocketed else { return }
+                if let prop = PTP.Prop(rawValue: UInt16(truncatingIfNeeded: param)) {
+                    await self.refreshPropForEvent(prop)
+                }
             case 0x400D:
                 // CaptureComplete。撮影直後は設定が変わっていることがあるので読み直す。
                 // ポケットの中では誰も見ていないので、取り出したときにまとめて読む
@@ -1429,5 +1500,54 @@ private final class ResumeOnce: @unchecked Sendable {
         guard !done else { return false }
         done = true
         return true
+    }
+}
+
+
+/// DeviceInfo から分かる、このカメラが受け付けるもの。送ってはいけない命令をここで止める。
+///
+/// Nikon 1（J1 など）は、名乗っていない命令や一部の独自命令を送ると USB の通信ごと固まり、
+/// ケーブルを挿し直すまで何も通らなくなる。libgphoto2 の記録:
+/// - ChangeCameraMode 0x90C2: J1 が固まる（#716。J1 はこの命令を名乗っていない）
+/// - GetEvent 0x90C7: V1・J1・S1・J3・J4 で不安定（#569 #716 #845）
+/// - GetVendorPropCodes 0x90CA: V1・J1・J2 で通信が壊れる
+/// - InitiateCaptureRecInSdram 0x90C0: V1・J1 で不安定。標準の InitiateCapture 0x100E に置き換えて撮れている
+/// D300 など他の機種では、これまで実機で通っている手順を変えないよう止めない
+struct CameraCapabilities {
+    let model: String
+    let operations: Set<UInt16>
+    let events: Set<UInt16>
+    let properties: Set<UInt16>
+    /// libgphoto2 と同じ判定: Nikon で、機種名が J・V で始まるか S1・S2
+    let isNikon1: Bool
+
+    private static let nikon1Unsafe: Set<UInt16> = [0x90C2, 0x90C7, 0x90CA, 0x90C0]
+
+    init(_ info: CameraSession.DeviceInfo) {
+        model = info.model
+        operations = Set(info.operations)
+        events = Set(info.events)
+        properties = Set(info.properties)
+        let nikon = info.manufacturer.localizedCaseInsensitiveContains("Nikon")
+        let first = info.model.first
+        isNikon1 = nikon && (first == "J" || first == "V" || (first == "S" && info.model.count < 3))
+    }
+
+    /// 送ってはいけなければ、その理由と代わりに返す応答コード
+    func refusal(_ op: PTP.Op, params: [UInt32]) -> (reason: String, code: UInt16)? {
+        guard isNikon1 else { return nil }
+        let code = op.rawValue
+        if Self.nikon1Unsafe.contains(code) {
+            return ("Nikon 1 で通信が壊れる命令", 0x2005)
+        }
+        if code >= 0x9000, !operations.contains(code) {
+            return ("カメラが名乗っていない命令", 0x2005)
+        }
+        if [PTP.Op.getDevicePropDesc, .getDevicePropValue, .setDevicePropValue].contains(op),
+           let prop = params.first.map({ UInt16(truncatingIfNeeded: $0) }),
+           !properties.contains(prop), !(0xF000...0xF01C).contains(prop) {
+            return ("カメラが名乗っていないプロパティ", 0x200A)
+        }
+        return nil
     }
 }

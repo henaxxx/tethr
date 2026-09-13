@@ -494,7 +494,7 @@ struct LiveViewToggle: View {
     @ObservedObject var live: LiveViewController
 
     var body: some View {
-        if session.isConnected, PropFormat.vendor == PropFormat.vendorNikon {
+        if session.isConnected, session.supportsLiveView {
             // カードの読み込み中は映像が返らないので押せなくする
             let ready = session.catalogReady
             Button {

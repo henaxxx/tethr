@@ -89,7 +89,14 @@ enum PropFormat {
                     ? "\(Int(seconds))\""
                     : String(format: "%.1f\"", seconds)
             }
-            return "1/\(Int((1 / seconds).rounded()))"
+            // 分母が整数でない段がある（1/2.5・1/1.6・1/1.3）。四捨五入すると 1/3・1/2・1/1 になり、
+            // 隣の段と表示が重なる。整数に近いときだけ整数で出す
+            let denominator = 1 / seconds
+            let nearest = denominator.rounded()
+            if abs(denominator - nearest) / denominator < 0.02 {
+                return "1/\(Int(nearest))"
+            }
+            return String(format: "1/%.1f", denominator)
 
         case .iso:
             return "\(value)"

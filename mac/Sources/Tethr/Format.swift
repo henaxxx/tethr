@@ -14,8 +14,14 @@ enum Format {
             let s = v.rounded() == v ? String(Int(v)) : String(format: "%.1f", v)
             return "\(s)\""
         }
-        let denom = (1 / v).rounded()
-        return "1/\(Int(denom))"
+        // 分母が整数でない段がある（1/2.5・1/1.6・1/1.3）。四捨五入すると 1/3・1/2・1/1 になり、
+        // 隣の段と表示が重なる。整数に近いときだけ整数で出す
+        let denominator = 1 / v
+        let nearest = denominator.rounded()
+        if abs(denominator - nearest) / denominator < 0.02 {
+            return "1/\(Int(nearest))"
+        }
+        return String(format: "1/%.1f", denominator)
     }
 
     /// "22" → "f/22" / "f/5.6" → "f/5.6"

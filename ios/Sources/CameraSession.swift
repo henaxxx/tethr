@@ -693,6 +693,11 @@ final class CameraSession: NSObject, ObservableObject {
                   let desc = PropDesc(data) else { continue }
             updated[prop] = desc
         }
+        #if DEBUG
+        if props[.exposureTime] == nil, let shutter = updated[.exposureTime] {
+            DebugLog.write("シャッタースピードの選択肢（生の値→表示）: " + shutter.choices.map { "\($0)→\(PropFormat.text(.exposureTime, $0))" }.joined(separator: " "))
+        }
+        #endif
         props = updated
     }
 

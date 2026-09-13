@@ -925,7 +925,16 @@ final class CameraSession: NSObject, ObservableObject {
     @discardableResult
     func send(_ op: PTP.Op, params: [UInt32] = [], outData: Data? = nil) async throws -> Data {
         guard let cam = camera else { throw CameraError.notConnected }
-        if let refusal = capabilities?.refusal(op, params: params) ?? CameraCapabilities.refusalBeforeDeviceInfo(op, params: params) {
+        // 「読めていて、通してよい」と「まだ読めていない」を取り違えないよう分けて判定する。
+        // `capabilities?.refusal(...) ?? 読む前の判定` と書くと、通してよいときの nil まで読む前扱いになり、
+        // D300 の独自命令が全部止まってライブビューも露出計も死んだ
+        let refusal: (reason: String, code: UInt16)?
+        if let caps = capabilities {
+            refusal = caps.refusal(op, params: params)
+        } else {
+            refusal = CameraCapabilities.refusalBeforeDeviceInfo(op, params: params)
+        }
+        if let refusal {
             // 送らずに断る。Nikon 1 は名乗っていない命令や一部の独自命令で通信ごと固まる
             let key = "\(op.rawValue)-\(params.first ?? 0)"
             if !refusalsLogged.contains(key) {

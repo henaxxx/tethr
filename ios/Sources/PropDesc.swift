@@ -120,8 +120,8 @@ enum PropFormat {
             }
 
         case .whiteBalance:
-            // PTP 仕様で定義されている値。機種を問わず共通。
             switch value {
+            // PTP 仕様で定義されている値。機種を問わず共通。
             case 1: return String(localized: "マニュアル")
             case 2: return String(localized: "オート")
             case 3: return String(localized: "ワンタッチ")
@@ -130,12 +130,55 @@ enum PropFormat {
             case 6: return String(localized: "電球")
             case 7: return String(localized: "フラッシュ")
             default:
-                // メーカー独自の値。推測で名前を付けず、コードのまま出す。
+                // 0x8000 以降はメーカー独自。同じ番号でもメーカーで意味が違う（富士は 0x8001〜 が蛍光灯の種類）ので、
+                // libgphoto2 の表（config.c の whitebalance[]）で確かめたものだけ名前を付ける
+                if let name = vendorWhiteBalanceName(value) { return name }
                 return String(format: "0x%04X", UInt16(truncatingIfNeeded: value))
             }
 
         case .imageSize:
             return "\(value)"
+        }
+    }
+
+    /// つないでいるカメラのメーカー（DeviceInfo の VendorExtensionID）。独自の値の読み方を決める
+    static var vendor: UInt32 = 0
+    static let vendorNikon: UInt32 = 0x0A
+    static let vendorSony: UInt32 = 0x11
+
+    private static func vendorWhiteBalanceName(_ value: Int64) -> String? {
+        switch (vendor, value) {
+        case (vendorNikon, 0x8010), (vendorSony, 0x8010): return String(localized: "曇天")
+        case (vendorNikon, 0x8011), (vendorSony, 0x8011): return String(localized: "日陰")
+        case (vendorNikon, 0x8012), (vendorSony, 0x8012): return String(localized: "色温度")
+        case (vendorNikon, 0x8013):                       return String(localized: "プリセット")
+        case (vendorNikon, 0x8014):                       return String(localized: "オフ")
+        case (vendorNikon, 0x8016):                       return String(localized: "自然光オート")
+        default: return nil
+        }
+    }
+
+    /// 白バランスのアイコン。ボタンにはこれだけを出す
+    static func whiteBalanceSymbol(_ value: Int64) -> String {
+        switch value {
+        case 1: return "slider.horizontal.3"
+        case 2: return "a.circle"
+        case 3: return "hand.tap"
+        case 4: return "sun.max"
+        case 5: return "light.cylindrical.ceiling"
+        case 6: return "lightbulb"
+        case 7: return "bolt"
+        default:
+            guard vendorWhiteBalanceName(value) != nil else { return "circle.lefthalf.filled" }
+            switch value {
+            case 0x8010: return "cloud"
+            case 0x8011: return "house"              // Nikon の表示でも日陰は家の絵
+            case 0x8012: return "thermometer.medium"
+            case 0x8013: return "eyedropper"
+            case 0x8014: return "circle.slash"
+            case 0x8016: return "sun.haze"
+            default:     return "circle.lefthalf.filled"
+            }
         }
     }
 }

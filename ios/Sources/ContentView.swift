@@ -46,9 +46,7 @@ struct ContentView: View {
         // 接続直後の下調べの間は何もできないので、全面で待っていることを伝える
         .overlay {
             if showPreparing {
-                PreparingOverlay(since: session.preparingSince,
-                                 count: session.lastKnownFileCount,
-                                 reveal: preparingReveal)
+                PreparingOverlay(count: session.lastKnownFileCount, reveal: preparingReveal)
                     .ignoresSafeArea()
                     .transition(.opacity)
             }
@@ -460,37 +458,51 @@ struct Filmstrip: View {
 
 /// ホワイトバランス。選択肢が少なく触る頻度も低いので、
 /// スクラバーを増やさずプルダウンに収める。
+/// 白バランス。ボタンには今の設定のアイコンだけを出し、名前はメニューの中で読む。
+///
+/// 以前はボタンに「電球」「晴天」などの文字を載せていて、横に並ぶ部品に押されて潰れていた。
 struct WhiteBalanceMenu: View {
     @EnvironmentObject var session: CameraSession
+    @State private var pending: Int64?
+    @State private var generation = 0
 
     var body: some View {
         if let wb = session.props[.whiteBalance], !wb.choices.isEmpty {
+            let shown = pending ?? wb.current
             Menu {
-                ForEach(wb.choices, id: \.self) { value in
-                    Button {
-                        Task { await session.setProp(.whiteBalance, to: value) }
-                    } label: {
-                        if value == wb.current {
-                            Label(PropFormat.text(.whiteBalance, value), systemImage: "checkmark")
-                        } else {
-                            Text(PropFormat.text(.whiteBalance, value))
-                        }
+                // メニューの中は標準のピッカーにして、選択中に印が付くようにする
+                Picker("", selection: Binding(get: { shown }, set: { select($0, from: wb) })) {
+                    ForEach(wb.choices, id: \.self) { value in
+                        Label(PropFormat.text(.whiteBalance, value),
+                              systemImage: PropFormat.whiteBalanceSymbol(value))
+                            .tag(value)
                     }
                 }
+                .pickerStyle(.inline)
             } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "circle.lefthalf.filled").font(.system(size: 10))
-                    Text(wb.currentText).font(.system(size: 11, weight: .medium))
-                    Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
-                }
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 4)
-                .background(Color(uiColor: .tertiarySystemBackground),
-                            in: RoundedRectangle(cornerRadius: 5))
+                Image(systemName: PropFormat.whiteBalanceSymbol(shown))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .frame(width: 32, height: 32)
+                    .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                    .contentTransition(.symbolEffect(.replace))
             }
+            .accessibilityLabel(Text("白バランス: \(PropFormat.text(.whiteBalance, shown))"))
             .disabled(!wb.writable)
             .opacity(wb.writable ? 1 : 0.5)
+        }
+    }
+
+    private func select(_ value: Int64, from wb: PropDesc) {
+        guard value != (pending ?? wb.current) else { return }
+        pending = value
+        generation += 1
+        let mine = generation
+        Task { @MainActor in
+            let accepted = await session.setProp(.whiteBalance, to: value)
+            guard mine == generation else { return }
+            pending = nil
+            if !accepted { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
         }
     }
 }

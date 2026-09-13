@@ -7,26 +7,18 @@ import SwiftUI
 /// 固まって見えないよう画面全体で待っていることを伝える。
 /// アイコンと同じ絞り羽根がゆっくり回りながら開閉し、終わると全開になって本来の画面が現れる。
 struct PreparingOverlay: View {
-    /// 準備が始まった時刻
-    let since: Date?
-    /// 前回このカメラで数えたカード内の件数。無ければ残り時間は出さない
+    /// 前回このカメラで数えたカード内の件数
     let count: Int?
     /// 準備が終わった時刻。ここから絞りを全開にして消える
     let reveal: Date?
 
-    private static let perFile = 0.017
     private let amber = Color(red: 0.96, green: 0.66, blue: 0.26)
 
     var body: some View {
         TimelineView(.animation) { timeline in
-            let now = timeline.date
-            let elapsed = since.map { now.timeIntervalSince($0) } ?? 0
-            let estimate = count.map { max(1, Double($0) * Self.perFile) }
-            let progress = reveal != nil ? 1 : estimate.map { min(0.95, elapsed / $0) }
-
             VStack(spacing: 0) {
                 Spacer()
-                ApertureIris(time: now, reveal: reveal)
+                ApertureIris(time: timeline.date, reveal: reveal)
                     .frame(width: 148, height: 148)
                     .padding(.bottom, 34)
 
@@ -34,26 +26,22 @@ struct PreparingOverlay: View {
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
                     .padding(.bottom, 6)
 
+                // 残り時間は出さない。同じ枚数でも 7 秒で終わる回と 38 秒かかる回があり、
+                // 予想を出すと大きく外れる（「あと 1 秒」から 15 秒以上待たされた）
                 Group {
-                    if let count, let estimate {
-                        let remaining = Int((estimate - elapsed).rounded(.up))
-                        if remaining > 0 {
-                            Text("\(count) 件・あと約 \(remaining) 秒")
-                        } else {
-                            Text("\(count) 件・もう少しで終わります")
-                        }
+                    if let count {
+                        Text("カード内 \(count) 件")
                     } else {
-                        Text("カメラの準備ができるまでお待ちください")
+                        Text(" ")
                     }
                 }
                 .font(.system(size: 13).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 22)
 
-                FilmFrames(progress: progress, time: now, lit: amber)
+                FilmFrames(time: timeline.date, lit: amber)
 
                 Spacer()
-
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -61,9 +49,8 @@ struct PreparingOverlay: View {
     }
 }
 
-/// フィルムのコマに見立てた進み具合。件数が分からないときは光が流れるだけにする
+/// フィルムのコマに見立てた待ちの表現。終わりの見当がつかないので、光が左から右へ流れ続ける
 private struct FilmFrames: View {
-    let progress: Double?
     let time: Date
     let lit: Color
 
@@ -81,17 +68,8 @@ private struct FilmFrames: View {
         }
     }
 
+    /// 光の先頭から尾を引いて消える
     private func level(_ i: Int, _ t: Double) -> Double {
-        if let progress {
-            let filled = progress * Double(frames)
-            if Double(i) < filled.rounded(.down) { return 1 }
-            if i == Int(filled) {
-                // いま読んでいるコマはゆっくり明滅させる
-                return 0.35 + 0.35 * (0.5 + 0.5 * sin(t * 5))
-            }
-            return 0
-        }
-        // 件数が分からない。光が左から右へ流れて、尾を引く
         let head = (t * 7).truncatingRemainder(dividingBy: Double(frames + 4))
         let d = head - Double(i)
         return d >= 0 && d < 4 ? 1 - d / 4 : 0

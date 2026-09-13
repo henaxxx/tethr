@@ -91,7 +91,11 @@
 "測位中" = "Tracking";
 "止めています（立ち止まり中）" = "Paused (standing still)";
 "カードを確認中" = "Checking the card";
-"%lld 件・あと約 %lld 秒" = "%lld files · about %lld s left";
-"%lld 件・もう少しで終わります" = "%lld files · almost there";
-"カメラの準備ができるまでお待ちください" = "Waiting for the camera to get ready";
 "この端末ではカメラに接続できません" = "This device cannot connect to a camera";
+"カード内 %lld 件" = "%lld files on the card";
+"曇天" = "Cloudy";
+"日陰" = "Shade";
+"色温度" = "Color temperature";
+"プリセット" = "Preset";
+"自然光オート" = "Natural light auto";
+"白バランス: %@" = "White balance: %@";

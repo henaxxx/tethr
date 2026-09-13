@@ -83,8 +83,6 @@ final class CameraSession: NSObject, ObservableObject {
     /// 準備中。セッションは開いたが、フレームワークがカードを下調べしていて命令が通らない。
     /// 長さはカードの枚数に比例する（1 件約 17 ミリ秒、D300 で 408 件 7 秒・0 件 0.003 秒）
     @Published private(set) var preparing = false
-    /// 準備が始まった時刻。待ち画面で残り時間を出すのに使う
-    @Published private(set) var preparingSince: Date?
     /// このカメラの前回のカード枚数。準備中に目安として出す
     @Published private(set) var lastKnownFileCount: Int?
     /// このカメラに初めてセッションを開いた時刻（端末の時計）。これより後に撮られたものがテザー側
@@ -338,6 +336,18 @@ final class CameraSession: NSObject, ObservableObject {
 
     // MARK: カードの中身
 
+    /// メーカーを読む。白バランス等の独自の値の読み方がメーカーで違うため
+    private func readVendor() async {
+        guard let data = try? await send(.getDeviceInfo) else { return }
+        var r = PTPReader(data)
+        guard r.read(UInt16.self) != nil, let vendor = r.read(UInt32.self) else { return }
+        if PropFormat.vendor != vendor {
+            PropFormat.vendor = vendor
+            DebugLog.write(String(format: "メーカー 0x%08X", vendor))
+            objectWillChange.send()
+        }
+    }
+
     /// 接続時点のオブジェクト数を数えて、次回の目安として覚えておく
     private func countObjects() async {
         guard expectedObjects == nil,
@@ -454,6 +464,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// 抜かれたカメラの後始末。挿し直すとオブジェクトが作り直されるので、それに紐づく状態は捨てる。
     /// カットの一覧は残す。うっかりケーブルが抜けても、同じカメラなら続きから使えるように。
     private func forgetDevice() {
+        UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
         camera = nil
         fileIndex = [:]
         connectedAt = nil
@@ -1014,7 +1025,6 @@ extension CameraSession: ICCameraDeviceDelegate {
             if self.connectedAt == nil {
                 // このカメラで初めて開いた。ここから準備完了まで命令が通らない
                 self.connectedAt = opened
-                self.preparingSince = opened
                 self.preparing = true
             }
             if !self.catalogReady { self.startProgressWatch() }
@@ -1023,12 +1033,18 @@ extension CameraSession: ICCameraDeviceDelegate {
             self.preparing = false
             if !self.classifyReady {
                 self.classifyReady = true
-                DebugLog.write(String(format: "時計を読んだ（ずれ %.1f 秒）。準備に %.1f 秒", self.clockDrift ?? 0, Date().timeIntervalSince(opened)))
+                // 準備の長さは 7 秒台と 38 秒台に分かれ、長いのは前の接続から 10 分以上空いた後に見える。
+                // まだ例が少ないので、空いた時間を一緒に残して確かめる
+                let gap = (UserDefaults.standard.object(forKey: "lastSessionEnded") as? Date).map { opened.timeIntervalSince($0) / 60 }
+                DebugLog.write(String(format: "時計を読んだ（ずれ %.1f 秒）。準備に %.1f 秒（前の接続から %@）",
+                                      self.clockDrift ?? 0, Date().timeIntervalSince(opened),
+                                      gap.map { String(format: "%.0f 分", $0) } ?? "不明"))
                 let held = self.pendingFiles
                 self.pendingFiles = []
                 self.ingest(held)
             }
             await self.countObjects()
+            await self.readVendor()
             self.scheduleCatalogSettle()
             self.checkEventUsable = true
             self.startEventPolling()
@@ -1038,6 +1054,7 @@ extension CameraSession: ICCameraDeviceDelegate {
 
     nonisolated func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
         Task { @MainActor in
+            UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
             guard device === self.camera else { return }
             DebugLog.write("セッションを閉じた")
             if self.reopenAfterClose, let cam = self.camera {

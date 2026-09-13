@@ -106,8 +106,9 @@ final class CameraSession: NSObject, ObservableObject {
         var location: CLLocation?
     }
     private var nextShotEventID = 0
-    /// 位置が後から届く撮影通知と、それに対応づいたカット名
-    private var fixTargets: [Int: String] = [:]
+    /// 精密な位置がまだ無い撮影通知を借りて、仮の位置で並べたカット（カット名 → 通知の番号）。
+    /// その通知に位置が届いたら、借りていたカット全部に入れる
+    private var provisionalShots: [String: Int] = [:]
     /// フレームワークが完了を告げたか。これだけでは完了とみなさない
     private var frameworkCatalogDone = false
     private var catalogSettle: Task<Void, Never>?
@@ -233,12 +234,14 @@ final class CameraSession: NSObject, ObservableObject {
     /// 撮影通知に対して、精密な位置が後から取れた
     private func applyShotFix(id: Int, _ fix: CLLocation?) {
         guard let fix else {
-            fixTargets[id] = nil
+            // 取れなかった。仮の位置のままにする
+            provisionalShots = provisionalShots.filter { $0.value != id }
             return
         }
-        if let i = shotEvents.firstIndex(where: { $0.id == id }) {
-            shotEvents[i].location = fix
-        } else if let name = fixTargets.removeValue(forKey: id) {
+        if let i = shotEvents.firstIndex(where: { $0.id == id }) { shotEvents[i].location = fix }
+        // 連写では 1 つの通知を何枚ものカットが借りている。全部に入れる
+        for (name, eventID) in provisionalShots where eventID == id {
+            provisionalShots[name] = nil
             if let i = liveShots.firstIndex(where: { $0.name == name }) { liveShots[i].location = fix }
             geoLog.recordShot(name, at: fix)
             DebugLog.write("位置を後から確定: \(name) 精度 \(Int(fix.horizontalAccuracy))m")
@@ -594,14 +597,23 @@ final class CameraSession: NSObject, ObservableObject {
         return taken >= cutoff
     }
 
-    /// 撮影通知のうち、このカットのものを取り出す。時計のずれと転送の遅れぶんは許す
-    private func takeShotEvent(near taken: Date) -> ShotEvent? {
-        let tolerance = abs(clockDrift ?? 0) + 5
-        guard let i = shotEvents.firstIndex(where: { abs($0.time.timeIntervalSince(taken)) <= tolerance }) else { return nil }
-        let event = shotEvents[i]
-        // それより古い通知は対になるカットが来なかったもの。捨てる
-        shotEvents.removeFirst(i + 1)
-        return event
+    /// 撮影時刻にいちばん近い撮影通知。
+    ///
+    /// 以前は通知とカットを 1 対 1 で使い切っていた（取り出した通知とそれより古い通知を捨てる）。
+    /// 連写では通知がカードに書き終えた順に数秒ずつ遅れて届くので、後ろのコマほど許容幅から外れて相手が無くなり、
+    /// 位置が抜けたり、後から取れた精密な位置が 1 枚にしか入らなかったりした。
+    /// 数秒の間に撮ったカットは同じ場所なので、通知は何枚で共有してもよい。
+    ///
+    /// いちばん近い通知（nearest）と、位置を持つ中でいちばん近い通知（located）を返す。
+    /// nearest にまだ位置が無ければ、located の位置で仮に並べ、nearest に位置が届いたら差し替える。
+    /// 歩きながら撮ったときに、少し前のカットの位置で確定させてしまわないため
+    private func shotEvents(near taken: Date) -> (nearest: ShotEvent?, located: ShotEvent?) {
+        // 通知はカードへの書き込みが終わってから届く。連写の後ろのコマはバッファの書き出し待ちで十数秒遅れうる
+        let tolerance = abs(clockDrift ?? 0) + 20
+        let candidates = shotEvents.filter { abs($0.time.timeIntervalSince(taken)) <= tolerance }
+        func distance(_ e: ShotEvent) -> TimeInterval { abs(e.time.timeIntervalSince(taken)) }
+        return (candidates.min { distance($0) < distance($1) },
+                candidates.filter { $0.location != nil }.min { distance($0) < distance($1) })
     }
 
     /// カード内のカット（つなぐ前に撮ったもの）の撮影地点を、端末の記録から探す。
@@ -642,10 +654,11 @@ final class CameraSession: NSObject, ObservableObject {
             var added: [Shot] = []
             for (var shot, _) in live {
                 if geotagging {
-                    let event = shot.captured.flatMap(takeShotEvent(near:))
+                    let (event, located) = shot.captured.map { shotEvents(near: $0) } ?? (nil, nil)
                     // 精密な位置がまだ取れていなければ、取れたときにこのカットへ入れる
-                    if let event, event.location == nil { fixTargets[event.id] = shot.name }
+                    if let event, event.location == nil { provisionalShots[shot.name] = event.id }
                     let here = event?.location
+                        ?? located?.location
                         ?? geoLog.shots[shot.name]?.location
                         ?? shot.captured.flatMap { geoLog.estimateLocation(at: $0) }
                         ?? location.current
@@ -653,7 +666,7 @@ final class CameraSession: NSObject, ObservableObject {
                         shot.location = here
                         if geoLog.shots[shot.name] == nil { geoLog.recordShot(shot.name, at: here) }
                     }
-                    DebugLog.write("テザー側: \(shot.name) 撮影 \(shot.captured.map { "\($0)" } ?? "?") 位置の出どころ=\(event?.location != nil ? "撮影通知" : here == nil ? "なし" : "軌跡か現在地")")
+                    DebugLog.write("テザー側: \(shot.name) 撮影 \(shot.captured.map { "\($0)" } ?? "?") 位置の出どころ=\(event?.location != nil ? "撮影通知" : located != nil ? "近くの撮影通知" : here == nil ? "なし" : "軌跡か現在地")\(provisionalShots[shot.name] != nil ? "（精密な位置待ち）" : "")")
                 } else {
                     DebugLog.write("テザー側: \(shot.name)")
                 }
@@ -722,7 +735,7 @@ final class CameraSession: NSObject, ObservableObject {
         expectedObjects = nil
         deliveredNames = []
         shotEvents = []
-        fixTargets = [:]
+        provisionalShots = [:]
         deferredThumbnails = []
         prefetchTask?.cancel()
         preparing = false
@@ -1508,7 +1521,10 @@ extension CameraSession: ICCameraDeviceDelegate {
                 let id = self.nextShotEventID
                 self.nextShotEventID += 1
                 self.shotEvents.append(ShotEvent(id: id, time: Date(), location: nil))
-                if self.shotEvents.count > 200 { self.shotEvents.removeFirst(self.shotEvents.count - 200) }
+                // 使い切らなくなったので、古いものは時刻で捨てる（カットが届くのは長くても数十秒後）
+                let cutoff = Date().addingTimeInterval(-10 * 60)
+                self.shotEvents.removeAll { $0.time < cutoff }
+                if self.shotEvents.count > 500 { self.shotEvents.removeFirst(self.shotEvents.count - 500) }
                 if self.geotagging {
                     // 立ち止まって衛星を止めていれば保持している位置がすぐ返り、無ければ衛星を起こして取る
                     self.location.fixForShot { [weak self] fix in

@@ -37,6 +37,10 @@ enum PTP {
         case exposureProgram  = 0x500E
         case iso              = 0x500F
         case exposureBias     = 0x5010
+        /// Nikon 独自のシャッタースピード。上位 16 ビットが分子、下位 16 ビットが分母の正確な分数。
+        /// 標準の 0x500D は 0.1 ミリ秒の整数に丸めるため、D300 では 1/8000 が 1、1/3200 が 3 になり
+        /// 「1/10000」「1/3333」と表示されていた（実機の選択肢で確認）。Nikon ではこちらを使う
+        case nikonExposureTime = 0xD100
 
         var label: String {
             switch self {
@@ -44,7 +48,7 @@ enum PTP {
             case .imageSize:       return String(localized: "画像サイズ")
             case .whiteBalance:    return String(localized: "WB")
             case .fNumber:         return String(localized: "絞り")
-            case .exposureTime:    return String(localized: "シャッター")
+            case .exposureTime, .nikonExposureTime: return String(localized: "シャッター")
             case .exposureProgram: return String(localized: "モード")
             case .iso:             return "ISO"
             case .exposureBias:    return String(localized: "露出補正")

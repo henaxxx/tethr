@@ -156,10 +156,11 @@ final class CameraSession: NSObject, ObservableObject {
     private var deferredThumbnails: Set<String> = []
     private var prefetchTask: Task<Void, Never>?
 
-    /// 一覧に出す設定の並び
-    static let displayed: [PTP.Prop] = [.exposureProgram, .exposureTime, .fNumber, .iso, .exposureBias]
     /// スクラバーで操作する設定
-    static let adjustable: [PTP.Prop] = [.exposureTime, .fNumber, .iso]
+    var adjustable: [PTP.Prop] {
+        let shutter: PTP.Prop = (props[.nikonExposureTime]?.choices.isEmpty == false) ? .nikonExposureTime : .exposureTime
+        return [shutter, .fNumber, .iso]
+    }
 
     /// 軌跡を背面でも取り続けるか。撮影の合間に画面を消しても切れないようにする。
     @Published var trackInBackground = false {
@@ -338,14 +339,47 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// メーカーを読む。白バランス等の独自の値の読み方がメーカーで違うため
     private func readVendor() async {
-        guard let data = try? await send(.getDeviceInfo) else { return }
-        var r = PTPReader(data)
-        guard r.read(UInt16.self) != nil, let vendor = r.read(UInt32.self) else { return }
+        guard let data = try? await send(.getDeviceInfo),
+              let info = Self.parseDeviceInfo(data) else { return }
+        var vendor = info.vendor
+        // D300 は VendorExtensionID に Microsoft（0x6 = MTP）を名乗る。
+        // libgphoto2 も同じ補正をしている（library.c: Manufacturer に "Nikon" があれば Nikon とみなす）
+        if vendor == 0x6 || vendor == 0xFFFF_FFFF || vendor == 0 {
+            if info.manufacturer.localizedCaseInsensitiveContains("Nikon") { vendor = PropFormat.vendorNikon }
+            else if info.manufacturer.localizedCaseInsensitiveContains("Sony") { vendor = PropFormat.vendorSony }
+        }
+        DebugLog.write(String(format: "メーカー 0x%08X（名乗り 0x%08X / %@）", vendor, info.vendor, info.manufacturer))
         if PropFormat.vendor != vendor {
             PropFormat.vendor = vendor
             DebugLog.write(String(format: "メーカー 0x%08X", vendor))
             objectWillChange.send()
         }
+    }
+
+    /// PTP の DeviceInfo から、メーカー番号とメーカー名を拾う。
+    ///   uint16 規格版 / uint32 VendorExtensionID / uint16 拡張版 / 文字列 拡張説明 / uint16 機能モード /
+    ///   配列×5（命令・イベント・属性・撮影形式・画像形式）/ 文字列 メーカー名 / …
+    private static func parseDeviceInfo(_ data: Data) -> (vendor: UInt32, manufacturer: String)? {
+        let b = [UInt8](data)
+        var i = 0
+        func u16() -> UInt16? { guard i + 2 <= b.count else { return nil }; defer { i += 2 }; return UInt16(b[i]) | UInt16(b[i + 1]) << 8 }
+        func u32() -> UInt32? {
+            guard i + 4 <= b.count else { return nil }; defer { i += 4 }
+            return UInt32(b[i]) | UInt32(b[i + 1]) << 8 | UInt32(b[i + 2]) << 16 | UInt32(b[i + 3]) << 24
+        }
+        func string() -> String? {
+            guard i < b.count else { return nil }
+            let n = Int(b[i]); i += 1
+            guard i + n * 2 <= b.count else { return nil }
+            let units = (0..<n).map { UInt16(b[i + 2 * $0]) | UInt16(b[i + 2 * $0 + 1]) << 8 }.filter { $0 != 0 }
+            i += n * 2
+            return String(decoding: units, as: UTF16.self)
+        }
+        func skipArray16() -> Bool { guard let n = u32(), i + Int(n) * 2 <= b.count else { return false }; i += Int(n) * 2; return true }
+        guard u16() != nil, let vendor = u32(), u16() != nil, string() != nil, u16() != nil,
+              skipArray16(), skipArray16(), skipArray16(), skipArray16(), skipArray16(),
+              let manufacturer = string() else { return nil }
+        return (vendor, manufacturer)
     }
 
     /// 接続時点のオブジェクト数を数えて、次回の目安として覚えておく
@@ -612,10 +646,15 @@ final class CameraSession: NSObject, ObservableObject {
         if changed.contains(UInt16(Self.lightMeterProp)) {
             await readLightMeter()
         }
-        // 露出まわりが動いたら、表示している設定を読み直す
-        let watched = Set(PTP.Prop.allCases.map(\.rawValue))
-        if !changed.isDisjoint(with: watched) {
+        // 露出まわりが動いたら、変わった設定だけ読み直す。
+        // A モードで半押しするとシャッタースピードが刻々と変わるので、そのたびに全部読むと往復がかさむ。
+        // 撮影モードが変わったときは書き込み可否がまとめて変わるので全部読む
+        if changed.contains(PTP.Prop.exposureProgram.rawValue) {
             await refreshProps()
+        } else {
+            for prop in PTP.Prop.allCases where changed.contains(prop.rawValue) {
+                await refreshProp(prop)
+            }
         }
         return true
     }
@@ -713,8 +752,10 @@ final class CameraSession: NSObject, ObservableObject {
             updated[prop] = desc
         }
         #if DEBUG
-        if props[.exposureTime] == nil, let shutter = updated[.exposureTime] {
-            DebugLog.write("シャッタースピードの選択肢（生の値→表示）: " + shutter.choices.map { "\($0)→\(PropFormat.text(.exposureTime, $0))" }.joined(separator: " "))
+        if props[.nikonExposureTime] == nil, let shutter = updated[.nikonExposureTime] {
+            DebugLog.write("Nikon シャッタースピード 0xD100 の選択肢: " + shutter.choices.map {
+                String(format: "%d/%d→", Int($0 >> 16), Int($0 & 0xFFFF)) + PropFormat.text(.nikonExposureTime, $0)
+            }.joined(separator: " "))
         }
         #endif
         props = updated

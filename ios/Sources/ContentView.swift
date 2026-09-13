@@ -561,7 +561,7 @@ struct ControlPanel: View {
                 .disabled(!session.isConnected || session.busy)
             }
 
-            ForEach(CameraSession.adjustable, id: \.self) { prop in
+            ForEach(session.adjustable, id: \.self) { prop in
                 if let desc = session.props[prop], !desc.choices.isEmpty {
                     ScrubberControl(
                         title: prop.label,

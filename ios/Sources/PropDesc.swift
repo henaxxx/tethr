@@ -98,6 +98,26 @@ enum PropFormat {
             }
             return String(format: "1/%.1f", denominator)
 
+        case .nikonExposureTime:
+            // libgphoto2 の _get_Nikon_ShutterSpeed と同じ読み方
+            switch UInt32(truncatingIfNeeded: value) {
+            case 0xFFFF_FFFF: return "Bulb"
+            case 0xFFFF_FFFE: return "x200"
+            case 0xFFFF_FFFD: return "Time"
+            default: break
+            }
+            let raw = UInt32(truncatingIfNeeded: value)
+            let numerator = Double(raw >> 16)
+            let denominator = Double(raw & 0xFFFF)
+            guard numerator > 0, denominator > 0 else { return "—" }
+            let seconds = numerator / denominator
+            if seconds >= 1 {
+                return seconds == seconds.rounded() ? "\(Int(seconds))\"" : String(format: "%.1f\"", seconds)
+            }
+            // 10/25 のような表し方もあるので、秒に直してから 1/x の形にそろえる
+            let reciprocal = denominator / numerator
+            return reciprocal == reciprocal.rounded() ? "1/\(Int(reciprocal))" : String(format: "1/%.1f", reciprocal)
+
         case .iso:
             return "\(value)"
 

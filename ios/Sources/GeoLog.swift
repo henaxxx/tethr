@@ -8,8 +8,8 @@ struct GeoPoint: Codable, Equatable {
     let alt: Double?
     let accuracy: Double?
 
-    init(_ location: CLLocation) {
-        time = location.timestamp
+    init(_ location: CLLocation, time: Date? = nil) {
+        self.time = time ?? location.timestamp
         lat = location.coordinate.latitude
         lon = location.coordinate.longitude
         alt = location.verticalAccuracy > 0 ? location.altitude : nil
@@ -114,9 +114,13 @@ final class GeoLog: ObservableObject {
 
     // MARK: 記録
 
-    func recordShot(_ name: String, at location: CLLocation) {
-        shots[name] = GeoPoint(location)
-        scheduleSave()
+    /// カットの位置を控える。時刻は位置を測った時刻ではなく、撮影の時刻にする。
+    /// 立ち止まって衛星を止めている間は、何時間も前に測った位置を使うので、測った時刻だと
+    /// カード取り込みでファイル名を照合するときの時刻の確認に落ちていた。
+    /// カットはたまにしか増えず、失うと取り返せないので、その場で書き出す
+    func recordShot(_ name: String, at location: CLLocation, time: Date) {
+        shots[name] = GeoPoint(location, time: time)
+        save()
     }
 
     /// 軌跡は間引いて溜める。
@@ -157,14 +161,21 @@ final class GeoLog: ObservableObject {
     // MARK: 永続化
 
     /// 1 点ごとに書くと点が増えるほど重くなる。まとめて書く。
+    ///
+    /// 以前は 20 点溜まるまで書かなかった。立ち止まっていると点がなかなか溜まらず、その間にアプリが
+    /// 終了させられると（入れ直し、スワイプで終了、背面での終了）、テザーで確定した位置ごと消えていた。
+    /// 20 点か 1 分のどちらか早い方で書く
     private func scheduleSave() {
         pendingSaves += 1
-        guard pendingSaves >= 20 else { return }
+        guard pendingSaves >= 20 || Date().timeIntervalSince(lastSaved) >= 60 else { return }
         save()
     }
 
+    private var lastSaved = Date()
+
     func save() {
         pendingSaves = 0
+        lastSaved = Date()
         guard let data = payload() else { return }
         try? data.write(to: Self.fileURL, options: .atomic)
     }

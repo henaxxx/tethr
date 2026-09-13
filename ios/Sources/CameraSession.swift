@@ -238,12 +238,13 @@ final class CameraSession: NSObject, ObservableObject {
             provisionalShots = provisionalShots.filter { $0.value != id }
             return
         }
+        let eventTime = shotEvents.first { $0.id == id }?.time ?? Date()
         if let i = shotEvents.firstIndex(where: { $0.id == id }) { shotEvents[i].location = fix }
         // 連写では 1 つの通知を何枚ものカットが借りている。全部に入れる
         for (name, eventID) in provisionalShots where eventID == id {
             provisionalShots[name] = nil
             if let i = liveShots.firstIndex(where: { $0.name == name }) { liveShots[i].location = fix }
-            geoLog.recordShot(name, at: fix)
+            geoLog.recordShot(name, at: fix, time: eventTime)
             DebugLog.write("位置を後から確定: \(name) 精度 \(Int(fix.horizontalAccuracy))m")
         }
     }
@@ -356,6 +357,8 @@ final class CameraSession: NSObject, ObservableObject {
         appActive = false
         updatePocketWatch()
         location.appDidEnterBackground()
+        // 背面に回ったあとは予告なく終了させられることがある。控えた位置をここで書き出しておく
+        geoLog.save()
         guard let cam = camera, cam.hasOpenSession else { return }
         closedForBackground = true
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "close-camera-session") { [weak self] in
@@ -623,7 +626,10 @@ final class CameraSession: NSObject, ObservableObject {
     private func cardLocation(for shot: Shot) -> CLLocation? {
         guard let captured = shot.captured else { return nil }
         let time = captured.addingTimeInterval(clockDrift ?? 0)
-        if let known = geoLog.shots[shot.name], abs(known.time.timeIntervalSince(time)) <= 10 * 60 {
+        // 番号は 9999 で一巡するので、別の日の同名カットを拾わないよう時刻を確かめる。
+        // 以前の記録は位置を測った時刻（立ち止まり中は何時間も前）が入っているので、撮影より前は 1 日まで許す
+        if let known = geoLog.shots[shot.name],
+           known.time <= time.addingTimeInterval(10 * 60), known.time >= time.addingTimeInterval(-24 * 3600) {
             return known.location(at: captured)
         }
         return geoLog.estimateLocation(at: time).map {
@@ -664,7 +670,9 @@ final class CameraSession: NSObject, ObservableObject {
                         ?? location.current
                     if let here {
                         shot.location = here
-                        if geoLog.shots[shot.name] == nil { geoLog.recordShot(shot.name, at: here) }
+                        if geoLog.shots[shot.name] == nil {
+                            geoLog.recordShot(shot.name, at: here, time: event?.time ?? shot.captured ?? Date())
+                        }
                     }
                     DebugLog.write("テザー側: \(shot.name) 撮影 \(shot.captured.map { "\($0)" } ?? "?") 位置の出どころ=\(event?.location != nil ? "撮影通知" : located != nil ? "近くの撮影通知" : here == nil ? "なし" : "軌跡か現在地")\(provisionalShots[shot.name] != nil ? "（精密な位置待ち）" : "")")
                 } else {

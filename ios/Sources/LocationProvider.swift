@@ -57,6 +57,9 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
     private var fixWaiters: [(CLLocation?) -> Void] = []
     private var boostTask: Task<Void, Never>?
     private var boosting = false
+    /// 立ち止まっている間も軌跡に点を打つ。GeoLog.estimateLocation の前提
+    private var heartbeatTask: Task<Void, Never>?
+    private static let heartbeatInterval: Duration = .seconds(120)
 
     override init() {
         super.init()
@@ -83,13 +86,35 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
             applyBackgroundMode()
             goPrecise()
             startMotion()
+            startHeartbeat()
         default:
             break
         }
     }
 
+    /// 立ち止まっている間は位置の更新が来ない（10m 動くまで来ないうえ、30 秒で衛星も止める）ので、軌跡に点が残らない。
+    /// すると「記録していたが動かなかった」と「アプリを閉じていて記録していなかった」の見分けがつかず、
+    /// 撮影時刻から位置を引くときに空白を埋めてよいか判断できない。そこで、動いていないと分かっているときだけ
+    /// 2 分おきに今の位置を打ち直す。動いているのに更新が来ない（地下など）ときは打たない
+    private func startHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.heartbeatInterval)
+                guard let self, !Task.isCancelled else { return }
+                guard self.enabled, self.inForeground, self.stationarySince != nil || self.mode == .holding,
+                      let base = self.heldFix ?? self.current,
+                      base.horizontalAccuracy >= 0, base.horizontalAccuracy <= 65 else { continue }
+                self.onUpdate?(CLLocation(coordinate: base.coordinate, altitude: base.altitude,
+                                          horizontalAccuracy: base.horizontalAccuracy,
+                                          verticalAccuracy: base.verticalAccuracy, timestamp: Date()))
+            }
+        }
+    }
+
     private func end() {
         stopMotion()
+        heartbeatTask?.cancel()
         holdTask?.cancel()
         boostTask?.cancel()
         boosting = false
@@ -246,6 +271,7 @@ final class LocationProvider: NSObject, CLLocationManagerDelegate {
         applyBackgroundMode()
         if mode == .off { goPrecise() }
         startMotion()
+        if heartbeatTask == nil { startHeartbeat() }
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {

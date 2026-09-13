@@ -604,6 +604,22 @@ final class CameraSession: NSObject, ObservableObject {
         return event
     }
 
+    /// カード内のカット（つなぐ前に撮ったもの）の撮影地点を、端末の記録から探す。
+    ///
+    /// 1. 以前テザーで届いたときに控えた位置（同じファイル名で、撮影時刻が近いものだけ。番号は一巡するので）
+    /// 2. 軌跡から撮影時刻で見積もる。つなぐ前のカメラ時計は合わせる前なので、接続時に読んだずれを足す
+    private func cardLocation(for shot: Shot) -> CLLocation? {
+        guard let captured = shot.captured else { return nil }
+        let time = captured.addingTimeInterval(clockDrift ?? 0)
+        if let known = geoLog.shots[shot.name], abs(known.time.timeIntervalSince(time)) <= 10 * 60 {
+            return known.location(at: captured)
+        }
+        return geoLog.estimateLocation(at: time).map {
+            CLLocation(coordinate: $0.coordinate, altitude: $0.altitude, horizontalAccuracy: $0.horizontalAccuracy,
+                       verticalAccuracy: $0.verticalAccuracy, timestamp: captured)
+        }
+    }
+
     /// 届いたファイルを一覧に振り分ける
     private func ingest(_ files: [ICCameraFile]) {
         guard !files.isEmpty else { return }
@@ -631,7 +647,7 @@ final class CameraSession: NSObject, ObservableObject {
                     if let event, event.location == nil { fixTargets[event.id] = shot.name }
                     let here = event?.location
                         ?? geoLog.shots[shot.name]?.location
-                        ?? shot.captured.flatMap { geoLog.location(near: $0) }
+                        ?? shot.captured.flatMap { geoLog.estimateLocation(at: $0) }
                         ?? location.current
                     if let here {
                         shot.location = here
@@ -653,6 +669,9 @@ final class CameraSession: NSObject, ObservableObject {
             }
         }
         if !card.isEmpty {
+            if geotagging {
+                for i in card.indices { card[i].location = cardLocation(for: card[i]) }
+            }
             cardShots.append(contentsOf: card)
             if catalogReady { cardShots.sort { $0.name > $1.name } }
         }
@@ -1281,6 +1300,13 @@ final class CameraSession: NSObject, ObservableObject {
     /// 取り込みの入口。カメラから読み出し、写真アプリへ保存するまでを行う。
     @discardableResult
     func importShot(_ shot: Shot) async -> URL? {
+        var shot = shot
+        if shot.location == nil, geotagging, !liveShots.contains(where: { $0.name == shot.name }) {
+            // 一覧に並べた後に軌跡が増えていることがある（Mac へ送る前の記録など）。取り込む時点でもう一度探す
+            shot.location = cardLocation(for: shot)
+            if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].location = shot.location }
+        }
+        DebugLog.write("取り込み: \(shot.name) 位置 \(shot.location.map { String(format: "%.5f,%.5f ±%.0fm", $0.coordinate.latitude, $0.coordinate.longitude, $0.horizontalAccuracy) } ?? "なし")")
         guard let url = await download(shot) else { return nil }
         markDownloaded(shot, url: url)
         _ = await saveToPhotos(url, shot: shot)

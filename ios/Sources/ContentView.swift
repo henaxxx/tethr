@@ -44,7 +44,12 @@ struct StatusHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Circle().fill(color).frame(width: 8, height: 8)
+            if session.preparing {
+                // 固まっているのではなく待っていると分かるように回しておく
+                ProgressView().controlSize(.mini)
+            } else {
+                Circle().fill(color).frame(width: 8, height: 8)
+            }
             Text(text).font(.system(size: 12, weight: .medium)).lineLimit(1)
             Spacer(minLength: 6)
             if session.isConnected {
@@ -77,6 +82,15 @@ struct StatusHeader: View {
     }
 
     private var text: String {
+        // 準備中はカードの枚数に比例して待たされ、その間は何も操作できない。
+        // 前回の枚数から目安を出す（D300 で 1 件約 17 ミリ秒）
+        if session.preparing {
+            if let count = session.lastKnownFileCount, count > 0 {
+                let seconds = max(1, Int((Double(count) * 0.017).rounded(.up)))
+                return String(localized: "カードを確認中（\(count) 件・約 \(seconds) 秒）")
+            }
+            return String(localized: "カードを確認中…")
+        }
         switch session.state {
         case .idle: return String(localized: "未接続")
         case .searching: return String(localized: "カメラを探しています…")

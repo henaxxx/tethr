@@ -60,29 +60,33 @@ final class CameraSession: NSObject, ObservableObject {
     private var progressTimer: Timer?
 
     // 「接続後に撮ったカットか」を、読み込み完了の合図で決めてはいけない。
-    // 実機で確かめたところ、USB を抜き差しした直後は完了の合図がフォルダ分だけの時点で先に届き、
+    // 実機で確かめたところ、USB を抜き差しした直後は完了の合図がほぼ空の時点で先に届き、
     // 写真はその後 45 秒かけて届く。合図を信じるとカードの古いカットが全部テザー側に流れ込み、
     // 現在地まで付いてしまう。逆に読み込み中に撮ったカットはカード側へ迷子になる。
-    // そこで libgphoto2 と同じく、接続した時点のオブジェクトハンドルを控えておき、
-    // それに無いものを接続後に撮ったとみなす。撮影の瞬間に届く ObjectAdded も併用する。
+    //
+    // PTP のオブジェクトハンドルで照合したいところだが、iOS の ICCameraItem.ptpObjectHandle は
+    // 常に 0 で使えなかった（D300 で確認）。そこで撮影時刻で切る。カメラの時計は接続のたびに
+    // 合わせているので、ずれは小さい。合わせる前のずれも読んでおき、その分を補正する。
 
-    /// 接続した時点でカメラにあったオブジェクト。同じ ICCameraDevice の間は取り直さない
-    private var initialHandles: Set<UInt32>?
-    /// GetObjectHandles が通らない機種。フレームワークの判定に頼る
-    private var handlesUnavailable = false
-    /// ハンドルを控える前に届いたファイル。判定できるようになってから流す
+    /// 準備中。セッションは開いたが、フレームワークがカードを下調べしていて命令が通らない。
+    /// 長さはカードの枚数に比例する（1 件約 17 ミリ秒、D300 で 408 件 7 秒・0 件 0.003 秒）
+    @Published private(set) var preparing = false
+    /// このカメラの前回のカード枚数。準備中に目安として出す
+    @Published private(set) var lastKnownFileCount: Int?
+    /// このカメラに初めてセッションを開いた時刻（端末の時計）。これより後に撮られたものがテザー側
+    private var connectedAt: Date?
+    /// 接続時点のカメラ時計のずれ（端末 − カメラ、秒）。正ならカメラが遅れていた
+    private var clockDrift: TimeInterval?
+    /// 時計を読み終えるまでは判定できないので、届いたファイルを溜めておく
+    private var classifyReady = false
     private var pendingFiles: [ICCameraFile] = []
-    /// 控えたハンドルとファイルの ptpObjectHandle が同じ番号体系かを、最初の 20 件で確かめる。
-    /// 食い違っていたら、カードの全カットが「接続後に撮った」判定になり現在地まで付いてしまう。
-    /// 確かめ終わるまでは一覧に出さずに溜めておく（0.1 秒おきに届くので 2 秒ほど）
-    private var handlesVerified = false
-    private var verifyBuffer: [ICCameraFile] = []
-    /// didAdd で届いたハンドル。読み込みの進み具合を数える
-    private var seenHandles: Set<UInt32> = []
-    /// 撮影の瞬間に ObjectAdded で知らされたハンドルと、その瞬間の位置。
-    /// セッションを閉じている間も届く（実機で確認）
-    private var announcedHandles: Set<UInt32> = []
-    private var announcedLocations: [UInt32: CLLocation] = [:]
+    /// 接続時点でカメラにあったオブジェクト数（フォルダを含む）。進み具合の分母
+    private var expectedObjects: Int?
+    /// 届いたファイル名。開き直しで同じものが届き直しても数え直さない
+    private var deliveredNames: Set<String> = []
+    /// 撮影の瞬間に届いた ObjectAdded の時刻と位置。古い順。
+    /// セッションを閉じていても届く（実機で確認）ので、撮影地点の一番の手がかりになる
+    private var shotEvents: [(time: Date, location: CLLocation?)] = []
     /// フレームワークが完了を告げたか。これだけでは完了とみなさない
     private var frameworkCatalogDone = false
     private var catalogSettle: Task<Void, Never>?
@@ -215,79 +219,43 @@ final class CameraSession: NSObject, ObservableObject {
 
     // MARK: カードの中身
 
-    /// 接続した時点でカメラにあるオブジェクトを控える。
-    /// 準備完了までは待たされるが、その間に届いたファイルは溜めてあるので取りこぼさない。
-    private func captureInitialHandles() async {
-        let cam = camera
-        do {
-            let data = try await send(.getObjectHandles, params: [0xFFFF_FFFF, 0, 0])
-            guard cam === camera else { return }
-            var r = PTPReader(data)
-            if let n = r.read(UInt32.self), n <= 200_000 {
-                var set = Set<UInt32>(minimumCapacity: Int(n))
-                for _ in 0..<n {
-                    guard let h = r.read(UInt32.self) else { break }
-                    set.insert(h)
-                }
-                initialHandles = set
-                // 枚数が少ないカードでは照合しようがないので、そのまま信じる
-                handlesVerified = set.count < 20
-                DebugLog.write("接続時のハンドル \(set.count) 件を控えた")
-            } else {
-                handlesUnavailable = true
-            }
-        } catch {
-            guard cam === camera else { return }
-            handlesUnavailable = true
-            DebugLog.write("GetObjectHandles 不可、フレームワークの判定に切り替え: \(error)")
-        }
-        let files = pendingFiles
-        pendingFiles = []
-        route(files)
-        scheduleCatalogSettle()
+    /// 接続時点のオブジェクト数を数えて、次回の目安として覚えておく
+    private func countObjects() async {
+        guard expectedObjects == nil,
+              let data = try? await send(.getObjectHandles, params: [0xFFFF_FFFF, 0, 0]) else { return }
+        var r = PTPReader(data)
+        guard let n = r.read(UInt32.self) else { return }
+        expectedObjects = Int(n)
+        if let id = lastCameraID { UserDefaults.standard.set(Int(n), forKey: "cardObjects.\(id)") }
+        DebugLog.write("カード内のオブジェクト \(n) 件")
     }
 
-    /// 番号体系を確かめ終えるまでは溜め、確かめたら一覧へ流す
-    private func route(_ files: [ICCameraFile]) {
-        guard initialHandles != nil, !handlesVerified else {
-            ingest(files)
-            return
-        }
-        verifyBuffer.append(contentsOf: files)
-        if verifyBuffer.count >= 20 { settleVerification() }
-    }
-
-    private func settleVerification() {
-        guard !handlesVerified else { return }
-        handlesVerified = true
-        let held = verifyBuffer
-        verifyBuffer = []
-        if let initial = initialHandles, !held.isEmpty {
-            let matched = held.filter { initial.contains($0.ptpObjectHandle) }.count
-            if matched == 0 && held.count >= 5 {
-                DebugLog.write("ハンドルの番号体系が一致しない（\(held.count) 件中 0 件）。フレームワークの判定に切り替え")
-                initialHandles = nil
-                handlesUnavailable = true
-            } else {
-                DebugLog.write("ハンドル照合 OK（\(held.count) 件中 \(matched) 件が接続時から存在）")
-            }
-        }
-        ingest(held)
-    }
-
-    /// 接続後に撮られたカットか
+    /// 接続後に撮られたカットか。
+    ///
+    /// 時計を合わせる前に撮られたカットはカメラの時計のまま、合わせた後は端末の時計で記録される。
+    /// カメラが遅れていた場合は、接続時点のカメラ時刻まで基準を下げれば両方拾える。
+    /// 進んでいた場合は、合わせた後のカットが基準を下回らないよう端末時刻を基準にする。
     private func isShotAfterConnecting(_ file: ICCameraFile) -> Bool {
-        let h = file.ptpObjectHandle
-        if announcedHandles.contains(h) { return true }
-        if let initial = initialHandles { return !initial.contains(h) }
-        return file.wasAddedAfterContentCatalogCompleted || catalogReady
+        guard let taken = file.creationDate, let since = connectedAt else { return catalogReady }
+        let cutoff = since.addingTimeInterval(-max(clockDrift ?? 0, 0) - 2)
+        return taken >= cutoff
+    }
+
+    /// 撮影通知のうち、このカットのものを取り出す。時計のずれと転送の遅れぶんは許す
+    private func takeShotEvent(near taken: Date) -> (time: Date, location: CLLocation?)? {
+        let tolerance = abs(clockDrift ?? 0) + 5
+        guard let i = shotEvents.firstIndex(where: { abs($0.time.timeIntervalSince(taken)) <= tolerance }) else { return nil }
+        let event = shotEvents[i]
+        // それより古い通知は対になるカットが来なかったもの。捨てる
+        shotEvents.removeFirst(i + 1)
+        return event
     }
 
     /// 届いたファイルを一覧に振り分ける
     private func ingest(_ files: [ICCameraFile]) {
         guard !files.isEmpty else { return }
         var listed = Set(liveShots.map(\.name)).union(cardShots.map(\.name))
-        var live: [Shot] = []
+        var live: [(Shot, ICCameraFile)] = []
         var card: [Shot] = []
         for file in files {
             guard let name = file.name else { continue }
@@ -295,25 +263,34 @@ final class CameraSession: NSObject, ObservableObject {
             fileIndex[name] = file
             guard !listed.contains(name) else { continue }
             listed.insert(name)
-
-            var shot = Shot(name: name, size: Int(file.fileSize), captured: file.creationDate)
-            if isShotAfterConnecting(file) {
-                // 撮った瞬間の位置があればそれを使う。無ければいまの位置（撮影から数秒以内に届くため）
-                let known = announcedLocations[file.ptpObjectHandle] ?? geoLog.shots[name]?.location
-                if geotagging, let here = known ?? location.current {
-                    shot.location = here
-                    if geoLog.shots[name] == nil { geoLog.recordShot(name, at: here) }
-                }
-                live.append(shot)
-                DebugLog.write("テザー側: \(name) handle=\(String(format: "0x%08X", file.ptpObjectHandle)) 通知\(announcedHandles.contains(file.ptpObjectHandle) ? "あり" : "なし")")
-            } else {
-                card.append(shot)
-            }
+            let shot = Shot(name: name, size: Int(file.fileSize), captured: file.creationDate)
+            if isShotAfterConnecting(file) { live.append((shot, file)) } else { card.append(shot) }
         }
+
         if !live.isEmpty {
-            liveShots.insert(contentsOf: live.sorted { $0.name > $1.name }, at: 0)
+            // 撮影通知は古い順に溜まっているので、カットも撮影順に並べてから対応づける
+            live.sort { ($0.0.captured ?? .distantPast) < ($1.0.captured ?? .distantPast) }
+            var added: [Shot] = []
+            for (var shot, _) in live {
+                if geotagging {
+                    let event = shot.captured.flatMap(takeShotEvent(near:))
+                    let here = event?.location
+                        ?? geoLog.shots[shot.name]?.location
+                        ?? shot.captured.flatMap { geoLog.location(near: $0) }
+                        ?? location.current
+                    if let here {
+                        shot.location = here
+                        if geoLog.shots[shot.name] == nil { geoLog.recordShot(shot.name, at: here) }
+                    }
+                    DebugLog.write("テザー側: \(shot.name) 撮影 \(shot.captured.map { "\($0)" } ?? "?") 位置の出どころ=\(event?.location != nil ? "撮影通知" : here == nil ? "なし" : "軌跡か現在地")")
+                } else {
+                    DebugLog.write("テザー側: \(shot.name)")
+                }
+                added.append(shot)
+            }
+            liveShots.insert(contentsOf: added.reversed(), at: 0)
             selection = liveShots.first?.id
-            for shot in live { requestThumbnail(for: shot) }
+            for shot in added { requestThumbnail(for: shot) }
         }
         if !card.isEmpty {
             cardShots.append(contentsOf: card)
@@ -324,8 +301,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// 完了の合図のあと、ファイルの到着が 1.5 秒途切れたら完了とみなす。
     /// 抜き差し直後は合図が先走り、その後もファイルが 0.1 秒おきに届き続けるため。
     private func scheduleCatalogSettle() {
-        guard frameworkCatalogDone, !catalogReady,
-              initialHandles != nil || handlesUnavailable else { return }
+        guard frameworkCatalogDone, !catalogReady, classifyReady else { return }
         catalogSettle?.cancel()
         catalogSettle = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(1500))
@@ -336,12 +312,10 @@ final class CameraSession: NSObject, ObservableObject {
 
     private func finishCatalog() {
         guard !catalogReady else { return }
-        // 20 件に満たないまま読み終わった場合も、溜めた分を判定して流す
-        settleVerification()
         // 挿し直しの間にカードが替わっていたら、もう無いカットを外す（取り込み済みは残す）。
         // 完了の判定が早すぎた場合に、まだ届いていないだけのカットを消さないよう、
-        // 届いた数が控えたハンドル数にほぼ達しているときに限る（フォルダは届かないことがあるので少し見逃す）
-        if let initial = initialHandles, seenHandles.count + 10 >= initial.count {
+        // 届いた数が接続時のオブジェクト数にほぼ達しているときに限る（フォルダの分は見逃す）
+        if let expected = expectedObjects, deliveredNames.count + 10 >= expected {
             liveShots.removeAll { fileIndex[$0.name] == nil && $0.localURL == nil }
             cardShots.removeAll { fileIndex[$0.name] == nil && $0.localURL == nil }
         }
@@ -357,14 +331,14 @@ final class CameraSession: NSObject, ObservableObject {
     private func forgetDevice() {
         camera = nil
         fileIndex = [:]
-        initialHandles = nil
-        handlesUnavailable = false
+        connectedAt = nil
+        clockDrift = nil
+        classifyReady = false
         pendingFiles = []
-        handlesVerified = false
-        verifyBuffer = []
-        seenHandles = []
-        announcedHandles = []
-        announcedLocations = [:]
+        expectedObjects = nil
+        deliveredNames = []
+        shotEvents = []
+        preparing = false
         frameworkCatalogDone = false
         catalogSettle?.cancel()
         catalogReady = false
@@ -399,6 +373,8 @@ final class CameraSession: NSObject, ObservableObject {
         guard let cameraTime = parser.date(from: head) else { return }
 
         let drift = Date().timeIntervalSince(cameraTime)
+        // 撮影時刻での判定に使うので、このカメラで最初に読んだずれを覚えておく
+        if clockDrift == nil { clockDrift = drift }
         guard abs(drift) > 2 else { return }   // 誤差の範囲なら触らない
 
         let now = parser.string(from: Date())
@@ -510,15 +486,14 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// カタログ読み込みの進捗を拾って画面に出す。
     /// 何も出ないと「固まった」ように見えるため。
-    /// フレームワークの百分率は挿し直し後に先走るので、控えたハンドルの到着数で数える。
+    /// フレームワークの百分率は挿し直し後に先走るので、接続時のオブジェクト数に対する到着数で数える。
     private func startProgressWatch() {
         progressTimer?.invalidate()
         progressTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] timer in
             Task { @MainActor in
                 guard let self, let cam = self.camera, !self.catalogReady else { timer.invalidate(); return }
-                if let initial = self.initialHandles, !initial.isEmpty {
-                    let loaded = initial.intersection(self.seenHandles).count
-                    self.catalogProgress = min(99, loaded * 100 / initial.count)
+                if let expected = self.expectedObjects, expected > 0 {
+                    self.catalogProgress = min(99, self.deliveredNames.count * 100 / expected)
                 } else {
                     self.catalogProgress = min(99, Int(cam.contentCatalogPercentCompleted))
                 }
@@ -792,6 +767,7 @@ extension CameraSession: ICDeviceBrowserDelegate {
                 self.selection = nil
             }
             self.lastCameraID = id
+            self.lastKnownFileCount = id.flatMap { UserDefaults.standard.object(forKey: "cardObjects.\($0)") as? Int }
             self.camera = cam
             cam.delegate = self
             self.state = .connecting(cam.name ?? "カメラ")
@@ -823,12 +799,24 @@ extension CameraSession: ICCameraDeviceDelegate {
             }
             self.state = .connected(device.name ?? "カメラ")
             DebugLog.write("セッションを開いた")
-            if !self.catalogReady { self.startProgressWatch() }
-            if self.initialHandles == nil && !self.handlesUnavailable {
-                await self.captureInitialHandles()
-                DebugLog.write(String(format: "ハンドル取得まで %.1f 秒", Date().timeIntervalSince(opened)))
+            if self.connectedAt == nil {
+                // このカメラで初めて開いた。ここから準備完了まで命令が通らない
+                self.connectedAt = opened
+                self.preparing = true
             }
+            if !self.catalogReady { self.startProgressWatch() }
+            // 時計は準備完了まで読めない。読み終えたら、溜めていたファイルを判定して流す
             await self.syncClock()
+            self.preparing = false
+            if !self.classifyReady {
+                self.classifyReady = true
+                DebugLog.write(String(format: "時計を読んだ（ずれ %.1f 秒）。準備に %.1f 秒", self.clockDrift ?? 0, Date().timeIntervalSince(opened)))
+                let held = self.pendingFiles
+                self.pendingFiles = []
+                self.ingest(held)
+            }
+            await self.countObjects()
+            self.scheduleCatalogSettle()
             self.startEventPolling()
             await self.refreshProps()
         }
@@ -856,19 +844,22 @@ extension CameraSession: ICCameraDeviceDelegate {
     }
 
     nonisolated func deviceDidBecomeReady(_ device: ICDevice) {
-        Task { @MainActor in DebugLog.write("準備完了") }
+        Task { @MainActor in
+            guard device === self.camera else { return }
+            self.preparing = false
+            DebugLog.write("準備完了")
+        }
     }
 
     nonisolated func cameraDevice(_ camera: ICCameraDevice, didAdd items: [ICCameraItem]) {
-        let handles = items.map(\.ptpObjectHandle)
         let files = items.compactMap { $0 as? ICCameraFile }
         Task { @MainActor in
             guard camera === self.camera else { return }
-            self.seenHandles.formUnion(handles)
-            if self.initialHandles == nil && !self.handlesUnavailable {
-                self.pendingFiles.append(contentsOf: files)
+            self.deliveredNames.formUnion(files.compactMap(\.name))
+            if self.classifyReady {
+                self.ingest(files)
             } else {
-                self.route(files)
+                self.pendingFiles.append(contentsOf: files)
             }
             self.scheduleCatalogSettle()
         }
@@ -896,10 +887,9 @@ extension CameraSession: ICCameraDeviceDelegate {
             switch code {
             case 0x4002:
                 // ObjectAdded。撮った瞬間に届くので、この時点の位置が撮影地点になる
-                guard let h = param else { return }
-                self.announcedHandles.insert(h)
-                if self.geotagging, let here = self.location.current { self.announcedLocations[h] = here }
-                DebugLog.write("撮影通知 handle=\(String(format: "0x%08X", h))")
+                self.shotEvents.append((Date(), self.geotagging ? self.location.current : nil))
+                if self.shotEvents.count > 200 { self.shotEvents.removeFirst(self.shotEvents.count - 200) }
+                DebugLog.write("撮影通知 handle=\(param.map { String(format: "0x%08X", $0) } ?? "?")")
             case 0x400D:
                 // CaptureComplete。撮影直後は設定が変わっていることがあるので読み直す
                 await self.refreshProps()
@@ -914,7 +904,7 @@ extension CameraSession: ICCameraDeviceDelegate {
     nonisolated func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         Task { @MainActor in
             guard device === self.camera else { return }
-            DebugLog.write("フレームワークの完了通知（この時点 \(self.seenHandles.count) 件）")
+            DebugLog.write("フレームワークの完了通知（この時点 \(self.deliveredNames.count) 件）")
             self.frameworkCatalogDone = true
             self.scheduleCatalogSettle()
         }

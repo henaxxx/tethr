@@ -83,3 +83,5 @@
 "やめる" = "Cancel";
 
 "カメラが取り外されました" = "Camera disconnected";
+"カードを確認中…" = "Checking the card…";
+"カードを確認中（%lld 件・約 %lld 秒）" = "Checking the card (%lld files, about %lld s)";

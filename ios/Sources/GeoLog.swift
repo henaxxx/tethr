@@ -55,6 +55,14 @@ final class GeoLog: ObservableObject {
 
     // MARK: 記録
 
+    /// 指定した時刻にいちばん近い軌跡の点。撮影通知を受け取れなかったカットの位置を、撮影時刻から引く
+    func location(near time: Date, within limit: TimeInterval = 120) -> CLLocation? {
+        guard let nearest = track.min(by: {
+            abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time))
+        }), abs(nearest.time.timeIntervalSince(time)) <= limit else { return nil }
+        return nearest.location
+    }
+
     func recordShot(_ name: String, at location: CLLocation) {
         shots[name] = GeoPoint(location)
         scheduleSave()

@@ -83,6 +83,8 @@ final class CameraSession: NSObject, ObservableObject {
     /// 準備中。セッションは開いたが、フレームワークがカードを下調べしていて命令が通らない。
     /// 長さはカードの枚数に比例する（1 件約 17 ミリ秒、D300 で 408 件 7 秒・0 件 0.003 秒）
     @Published private(set) var preparing = false
+    /// 準備が始まった時刻。待ち画面で残り時間を出すのに使う
+    @Published private(set) var preparingSince: Date?
     /// このカメラの前回のカード枚数。準備中に目安として出す
     @Published private(set) var lastKnownFileCount: Int?
     /// このカメラに初めてセッションを開いた時刻（端末の時計）。これより後に撮られたものがテザー側
@@ -701,23 +703,41 @@ final class CameraSession: NSObject, ObservableObject {
         props = updated
     }
 
-    /// 設定を書き換える。データ型に応じた幅で値を渡す必要がある。
-    func setProp(_ prop: PTP.Prop, to value: Int64) async {
-        guard let desc = props[prop] else { return }
+    /// 設定を書き換える。データ型に応じた幅で値を渡す必要がある。通ったかを返す。
+    ///
+    /// 読み直すのは変えた設定だけにする。全部読み直すと 1 回ごとに往復が 8 回増え、
+    /// スクラバーの確定が遅れて見える。連動して変わる他の設定（M で絞りを変えたときの露出計など）は
+    /// CheckEvent が拾う。撮影モードだけは書き込み可否がまとめて変わるので全部読み直す。
+    @discardableResult
+    func setProp(_ prop: PTP.Prop, to value: Int64) async -> Bool {
+        guard let desc = props[prop] else { return false }
         var payload = Data()
         switch desc.dataType {
         case .int8, .uint8:   payload.appendLE(UInt8(truncatingIfNeeded: value))
         case .int16, .uint16: payload.appendLE(UInt16(truncatingIfNeeded: value))
         case .int32, .uint32: payload.appendLE(UInt32(truncatingIfNeeded: value))
         case .int64, .uint64: payload.appendLE(UInt64(truncatingIfNeeded: value))
-        case .string:         return
+        case .string:         return false
         }
         do {
             try await send(.setDevicePropValue, params: [UInt32(prop.rawValue)], outData: payload)
-            await refreshProps()
+            if prop == .exposureProgram {
+                await refreshProps()
+            } else {
+                await refreshProp(prop)
+            }
+            return true
         } catch {
             lastError = String(localized: "\(prop.label) を変更できませんでした: \(describe(error))")
+            return false
         }
+    }
+
+    /// 1 つの設定だけ読み直す
+    private func refreshProp(_ prop: PTP.Prop) async {
+        guard let data = try? await send(.getDevicePropDesc, params: [UInt32(prop.rawValue)]),
+              let desc = PropDesc(data) else { return }
+        props[prop] = desc
     }
 
     /// AF を走らせる。実機のシャッター半押しに相当する。
@@ -988,6 +1008,7 @@ extension CameraSession: ICCameraDeviceDelegate {
             if self.connectedAt == nil {
                 // このカメラで初めて開いた。ここから準備完了まで命令が通らない
                 self.connectedAt = opened
+                self.preparingSince = opened
                 self.preparing = true
             }
             if !self.catalogReady { self.startProgressWatch() }

@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @EnvironmentObject var session: CameraSession
     @State private var reviewing = false
+    @State private var showPreparing = false
+    @State private var preparingReveal: Date?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,6 +39,34 @@ struct ContentView: View {
             guard id != nil else { return }
             reviewing = true
             session.reviewOnReturn = nil
+        }
+        // 接続直後の下調べの間は何もできないので、全面で待っていることを伝える
+        .overlay {
+            if showPreparing {
+                PreparingOverlay(since: session.preparingSince,
+                                 count: session.lastKnownFileCount,
+                                 reveal: preparingReveal)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+            }
+        }
+        .onChange(of: session.preparing, initial: true) { _, preparing in
+            if preparing {
+                preparingReveal = nil
+                // カードがほぼ空なら一瞬で終わる。そのときにちらつかせない
+                Task {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    guard session.preparing else { return }
+                    withAnimation(.easeIn(duration: 0.25)) { showPreparing = true }
+                }
+            } else if showPreparing {
+                // 絞りを全開にしてから消す
+                preparingReveal = Date()
+                Task {
+                    try? await Task.sleep(for: .milliseconds(480))
+                    withAnimation(.easeOut(duration: 0.3)) { showPreparing = false }
+                }
+            }
         }
         .task {
             if case .idle = session.state { session.start() }
@@ -446,17 +476,9 @@ struct ControlPanel: View {
                 if let mode = session.props[.exposureProgram], !mode.choices.isEmpty {
                     // 選択肢はカメラが申告したものをそのまま出す。
                     // 機種によって並びも項目数も違うため決め打ちにしない。
-                    Picker("", selection: Binding(
-                        get: { mode.current },
-                        set: { newValue in Task { await session.setProp(.exposureProgram, to: newValue) } }
-                    )) {
-                        ForEach(mode.choices, id: \.self) { value in
-                            Text(PropFormat.text(.exposureProgram, value)).tag(value)
-                        }
+                    ModeSelector(desc: mode) { value in
+                        await session.setProp(.exposureProgram, to: value)
                     }
-                    .pickerStyle(.segmented)
-                    .disabled(!mode.writable)
-                    .frame(maxWidth: 150)
                 } else if let mode = session.props[.exposureProgram] {
                     Text(mode.currentText)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -504,7 +526,7 @@ struct ControlPanel: View {
                         selectedIndex: desc.choices.firstIndex(of: desc.current) ?? 0,
                         enabled: desc.writable,
                         onSelect: { index in
-                            Task { await session.setProp(prop, to: desc.choices[index]) }
+                            await session.setProp(prop, to: desc.choices[index])
                         }
                     )
                 }
@@ -514,6 +536,59 @@ struct ControlPanel: View {
         .padding(.vertical, 12)
         .sheet(isPresented: $showGeoPanel) {
             GeoPanel().environmentObject(session)
+        }
+    }
+}
+
+
+/// 撮影モードの切り替え。M・P・A・S を丸いボタンで並べる。
+///
+/// 標準のセグメントを狭い幅に押し込むと、区画が横に潰れた楕円になっていた。
+/// スクラバーと同じく、押した瞬間にそのボタンを選んだ状態にしてカメラの返事を待つ。
+struct ModeSelector: View {
+    let desc: PropDesc
+    let onSelect: (Int64) async -> Bool
+
+    @State private var pending: Int64?
+    @State private var generation = 0
+
+    private var shown: Int64 { pending ?? desc.current }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(desc.choices, id: \.self) { value in
+                let label = PropFormat.text(.exposureProgram, value)
+                let selected = shown == value
+                Button { select(value) } label: {
+                    Text(label)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(selected ? Color.white : Color.secondary)
+                        // 1〜2 文字なら正円、機種独自の長い名前なら横に伸びる
+                        .frame(minWidth: 30, minHeight: 30)
+                        .padding(.horizontal, label.count > 2 ? 8 : 0)
+                        .background(Capsule().fill(selected ? Color.accentColor : Color(uiColor: .tertiarySystemFill)))
+                        .scaleEffect(selected ? 1 : 0.92)
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .animation(.spring(response: 0.26, dampingFraction: 0.8), value: shown)
+        .opacity(desc.writable ? 1 : 0.6)
+        .disabled(!desc.writable)
+        .sensoryFeedback(.selection, trigger: pending) { _, new in new != nil }
+    }
+
+    private func select(_ value: Int64) {
+        guard value != shown else { return }
+        pending = value
+        generation += 1
+        let mine = generation
+        Task { @MainActor in
+            let accepted = await onSelect(value)
+            guard mine == generation else { return }
+            pending = nil
+            if !accepted { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
         }
     }
 }

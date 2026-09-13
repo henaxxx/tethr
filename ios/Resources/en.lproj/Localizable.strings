@@ -90,3 +90,8 @@
 "オフ" = "Off";
 "測位中" = "Tracking";
 "止めています（立ち止まり中）" = "Paused (standing still)";
+"カードを確認中" = "Checking the card";
+"%lld 件・あと約 %lld 秒" = "%lld files · about %lld s left";
+"%lld 件・もう少しで終わります" = "%lld files · almost there";
+"カメラの準備ができるまでお待ちください" = "Waiting for the camera to get ready";
+"カード内の写真が多いほど、つないだ直後の待ち時間が長くなります。Mac に保存したあとカメラでフォーマットすると、次から速くつながります。" = "The more photos on the card, the longer this wait after connecting. Formatting the card in the camera once they are saved to your Mac makes the next connection quick.";

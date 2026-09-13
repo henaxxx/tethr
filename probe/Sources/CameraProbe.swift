@@ -193,23 +193,45 @@ final class CameraProbe: NSObject, ObservableObject {
     func readISO()            { send("ISO を取得", code: 0x1015, params: [0x500F]) }
     /// バッテリー残量
     func readBattery()        { send("バッテリーを取得", code: 0x1015, params: [0x5001]) }
-    /// 制御権をホストへ (1) / カメラへ返す (0)。
-    /// Mac 版で判明したとおり、Nikon はこれでホスト制御に入る。
-    /// ライブビューが 0xA004 InvalidStatus で弾かれたのは、
-    /// これを送らずに開始しようとしたためと考えられる。
-    func takeControl()        { send("制御権を取得", code: 0x9008, params: [1]) }
-    func releaseControl()     { send("制御権を返す", code: 0x9008, params: [0]) }
+    /// 制御権をホストへ (1) / カメラへ返す (0)。Nikon ChangeCameraMode = 0x90C2。
+    ///
+    /// 以前はここで 0x9008 を送っていたが、Nikon の 0x9008 は DeleteProfile
+    /// （無線 LAN プロファイルの削除）で、制御権とは無関係だった。
+    /// 「iOS では制御権が握り潰される」という結論はこの取り違えによるもので、
+    /// 正しい命令ではまだ検証していない。libgphoto2 の ptp.h / library.c と照合済み。
+    func takeControl()        { send("制御権を取得", code: 0x90C2, params: [1]) }
+    func releaseControl()     { send("制御権を返す", code: 0x90C2, params: [0]) }
 
-    /// 制御権を取ってからライブビューを開始し、1コマ取得するまでを続けて行う。
+    /// 背面液晶の撮影直後レビュー（再生メニューの「撮影直後の画像確認」）
+    func readImageReview()    { send("撮影直後の画像確認を取得", code: 0x1015, params: [0xD165]) }
+    /// 記録先。0 = カード、1 = SDRAM（カードに残らず、背面にも出ない）
+    func readRecordingMedia() { send("記録先を取得", code: 0x1015, params: [0xD10B]) }
+    func setRecordingMediaCard() {
+        send("記録先をカードに", code: 0x1016, params: [0xD10B], outData: Data([0])) { [weak self] ok in
+            guard ok else { return }
+            self?.send("記録先を読み直す", code: 0x1015, params: [0xD10B])
+        }
+    }
+    /// ライブビューを始められない理由のビット列。0 なら障害なし。
+    func readLiveViewProhibit() { send("ライブビュー禁止条件を取得", code: 0x1015, params: [0xD1A4]) }
+
+    /// libgphoto2 の Nikon ライブビュー開始手順をそのままなぞる（library.c）。
+    ///   ChangeCameraMode(1) → RecordingMedia = SDRAM → StartLiveView → 画像取得
+    /// ChangeCameraModeFailed (0xA003) は libgphoto2 も無視して先へ進むので、ここでも止めない。
     func liveViewSequence() {
-        send("制御権を取得", code: 0x9008, params: [1]) { [weak self] ok in
+        send("制御権を取得", code: 0x90C2, params: [1]) { [weak self] _ in
             guard let self else { return }
-            guard ok else { self.note("制御権が取れないので中止", ok: false); return }
-            self.send("ライブビュー開始", code: 0x9201) { ok2 in
-                guard ok2 else { self.note("ライブビューを開始できないので中止", ok: false); return }
-                // カメラがミラーアップを終えるまで少し待つ
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.send("ライブビュー画像", code: 0x9203)
+            self.send("記録先を SDRAM に", code: 0x1016, params: [0xD10B], outData: Data([1])) { _ in
+                self.send("ライブビュー開始", code: 0x9201) { ok in
+                    guard ok else {
+                        self.readLiveViewProhibit()
+                        self.note("開始できないので禁止条件を読んだ", ok: false)
+                        return
+                    }
+                    // カメラがミラーアップを終えるまで少し待つ
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        self.send("ライブビュー画像", code: 0x9203)
+                    }
                 }
             }
         }

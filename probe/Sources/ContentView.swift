@@ -34,13 +34,20 @@ struct ContentView: View {
                 .disabled(probe.openedName == nil)
 
                 Section("制御権") {
-                    Button("制御権を取得 (0x9008 → 1)") { probe.takeControl() }
-                    Button("制御権を返す (0x9008 → 0)") { probe.releaseControl() }
+                    Button("制御権を取得 (0x90C2 → 1)") { probe.takeControl() }
+                    Button("制御権を返す (0x90C2 → 0)") { probe.releaseControl() }
+                }
+                .disabled(probe.openedName == nil)
+
+                Section("背面レビュー") {
+                    Button("撮影直後の画像確認 (0xD165)") { probe.readImageReview() }
+                    Button("記録先 (0xD10B)") { probe.readRecordingMedia() }
+                    Button("記録先をカードに戻す") { probe.setRecordingMediaCard() }
                 }
                 .disabled(probe.openedName == nil)
 
                 Section("ライブビュー") {
-                    Button("制御権つきで開始して1コマ取得") { probe.liveViewSequence() }
+                    Button("libgphoto2 と同じ手順で開始して1コマ取得") { probe.liveViewSequence() }
                     Button("開始 (0x9201)") { probe.liveViewStart() }
                     Button("画像を取得 (0x9203)") { probe.liveViewGrab() }
                     Button("終了 (0x9202)") { probe.liveViewStop() }

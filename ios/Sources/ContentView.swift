@@ -5,8 +5,11 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @EnvironmentObject var session: CameraSession
     @State private var reviewing = false
-    @State private var showPreparing = false
+    /// 起動した最初の画面から待ち画面を出しておく。通常の画面が一瞬見えてから切り替わらないように
+    @State private var showPreparing = true
     @State private var preparingReveal: Date?
+    /// 起動直後、つながっているカメラが見つかるまでの猶予。見つからなければ待ち画面を閉じる
+    @State private var launching = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,26 +53,54 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
-        .onChange(of: session.preparing, initial: true) { _, preparing in
-            if preparing {
-                preparingReveal = nil
-                // カードがほぼ空なら一瞬で終わる。そのときにちらつかせない
-                Task {
-                    try? await Task.sleep(for: .milliseconds(400))
-                    guard session.preparing else { return }
-                    withAnimation(.easeIn(duration: 0.25)) { showPreparing = true }
-                }
-            } else if showPreparing {
-                // 絞りを全開にしてから消す
-                preparingReveal = Date()
-                Task {
-                    try? await Task.sleep(for: .milliseconds(480))
-                    withAnimation(.easeOut(duration: 0.3)) { showPreparing = false }
-                }
-            }
+        .onChange(of: session.preparing) { _, _ in updatePreparingOverlay() }
+        .onChange(of: session.state) { _, _ in updatePreparingOverlay() }
+        .task {
+            // つながっているカメラなら、ここまでに見つかってセッションを開き始めている
+            try? await Task.sleep(for: .milliseconds(1200))
+            launching = false
+            updatePreparingOverlay()
         }
         .task {
             if case .idle = session.state { session.start() }
+        }
+    }
+}
+
+extension ContentView {
+    /// いま待ち画面を出すべきか。
+    ///
+    /// 起動直後はカメラが見つかるまで少し待つ。見つかれば準備（カードの下調べ）が終わるまで出し続け、
+    /// 見つからない・許可が無い・失敗したときは閉じる。起動後のつなぎ直しでは、
+    /// カードがほぼ空で一瞬で終わる場合にちらつかないよう 0.4 秒待ってから出す。
+    fileprivate func updatePreparingOverlay() {
+        let waiting: Bool
+        switch session.state {
+        case .idle, .searching, .connecting:
+            waiting = launching || session.preparing
+        case .connected:
+            waiting = session.preparing
+        case .failed, .unauthorized:
+            waiting = false
+        }
+
+        if waiting {
+            preparingReveal = nil
+            guard !showPreparing else { return }
+            Task {
+                try? await Task.sleep(for: .milliseconds(400))
+                guard session.preparing else { return }
+                withAnimation(.easeIn(duration: 0.25)) { showPreparing = true }
+            }
+        } else if showPreparing, preparingReveal == nil {
+            // 絞りを全開にしてから消す
+            preparingReveal = Date()
+            Task {
+                try? await Task.sleep(for: .milliseconds(480))
+                guard preparingReveal != nil else { return }
+                withAnimation(.easeOut(duration: 0.3)) { showPreparing = false }
+                preparingReveal = nil
+            }
         }
     }
 }
@@ -541,10 +572,14 @@ struct ControlPanel: View {
 }
 
 
-/// 撮影モードの切り替え。M・P・A・S を丸いボタンで並べる。
+/// 撮影モードの切り替え。標準のセグメントで、選択中のガラスが正円になる幅に固定する。
 ///
-/// 標準のセグメントを狭い幅に押し込むと、区画が横に潰れた楕円になっていた。
-/// スクラバーと同じく、押した瞬間にそのボタンを選んだ状態にしてカメラの返事を待つ。
+/// iOS 26 の標準セグメントは、本体の高さが 32 で、選択中のガラス（_UILiquidLensView）が
+/// 上下左右に 2 ずつ内側に描かれる。ガラスの高さは幅によらず 28 なので、区画の幅を 32 にすると
+/// 28×28 の正円になる（シミュレータで幅 120〜170 の実寸を読んで確認）。
+/// 以前は幅 150 に押し込んでいたため、ガラスが 33.5×28 の楕円になっていた。
+///
+/// スクラバーと同じく、押した瞬間にその区画を選んだ状態にしてカメラの返事を待つ。
 struct ModeSelector: View {
     let desc: PropDesc
     let onSelect: (Int64) async -> Bool
@@ -552,35 +587,30 @@ struct ModeSelector: View {
     @State private var pending: Int64?
     @State private var generation = 0
 
-    private var shown: Int64 { pending ?? desc.current }
+    private static let segmentWidth: CGFloat = 32
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(desc.choices, id: \.self) { value in
-                let label = PropFormat.text(.exposureProgram, value)
-                let selected = shown == value
-                Button { select(value) } label: {
-                    Text(label)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(selected ? Color.white : Color.secondary)
-                        // 1〜2 文字なら正円、機種独自の長い名前なら横に伸びる
-                        .frame(minWidth: 30, minHeight: 30)
-                        .padding(.horizontal, label.count > 2 ? 8 : 0)
-                        .background(Capsule().fill(selected ? Color.accentColor : Color(uiColor: .tertiarySystemFill)))
-                        .scaleEffect(selected ? 1 : 0.92)
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(selected ? .isSelected : [])
+        let labels = desc.choices.map { PropFormat.text(.exposureProgram, $0) }
+        // 機種独自の長い名前があるときは正円にこだわらず、文字が収まる幅に任せる
+        let fitsCircle = labels.allSatisfy { $0.count <= 2 }
+
+        Picker("", selection: Binding(
+            get: { pending ?? desc.current },
+            set: { select($0) }
+        )) {
+            ForEach(Array(zip(desc.choices, labels)), id: \.0) { value, label in
+                Text(label).tag(value)
             }
         }
-        .animation(.spring(response: 0.26, dampingFraction: 0.8), value: shown)
-        .opacity(desc.writable ? 1 : 0.6)
+        .pickerStyle(.segmented)
+        .frame(width: fitsCircle ? CGFloat(desc.choices.count) * Self.segmentWidth : nil)
+        // 横に並ぶ他の部品に押されて縮むと、また楕円になる
+        .fixedSize()
         .disabled(!desc.writable)
-        .sensoryFeedback(.selection, trigger: pending) { _, new in new != nil }
     }
 
     private func select(_ value: Int64) {
-        guard value != shown else { return }
+        guard value != (pending ?? desc.current) else { return }
         pending = value
         generation += 1
         let mine = generation

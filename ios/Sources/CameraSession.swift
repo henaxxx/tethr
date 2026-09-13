@@ -257,6 +257,12 @@ final class CameraSession: NSObject, ObservableObject {
     // MARK: 接続
 
     func start() {
+        // シミュレータの ImageCaptureCore にはこの機能が入っておらず、呼ぶと落ちる。
+        // 実機では常にあるが、無い環境で即終了しないよう確かめてから呼ぶ
+        guard browser.responds(to: NSSelectorFromString("requestContentsAuthorizationWithCompletion:")) else {
+            state = .failed(String(localized: "この端末ではカメラに接続できません"))
+            return
+        }
         state = .searching
         browser.requestContentsAuthorization { [weak self] status in
             Task { @MainActor in

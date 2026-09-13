@@ -54,14 +54,6 @@ struct PreparingOverlay: View {
 
                 Spacer()
 
-                if let count, count >= 100 {
-                    Text("カード内の写真が多いほど、つないだ直後の待ち時間が長くなります。Mac に保存したあとカメラでフォーマットすると、次から速くつながります。")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 44)
-                        .padding(.bottom, 36)
-                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

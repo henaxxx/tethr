@@ -56,9 +56,6 @@
 "%lld カット" = "%lld shots";
 "軌跡" = "Track";
 "%lld 点" = "%lld points";
-"記録時間" = "Duration";
-"%lld分" = "%lld min";
-"%lld時間%lld分" = "%lldh %lldm";
 "記録を消去" = "Clear recording";
 "記録を消去しますか" = "Clear the recording?";
 "控えてある撮影地点と軌跡がすべて失われます。取り込み済みの写真には影響しません。" = "All stored capture locations and track points will be lost. Photos you already imported are unaffected.";
@@ -123,3 +120,6 @@
 "%lld〜%lld%%" = "%lld–%lld%%";
 "記録期間" = "Period";
 "この機種は USB から設定を変えられません。露出や ISO は本体で設定してください。" = "This camera does not allow settings to be changed over USB. Set exposure and ISO on the camera.";
+"カメラ" = "Camera";
+"ピントが合いませんでした" = "Could not focus";
+"応答なし" = "No response";

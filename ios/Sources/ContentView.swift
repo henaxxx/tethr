@@ -164,7 +164,7 @@ struct StatusHeader: View {
             return String(localized: "カードを確認中…")
         }
         if session.userDisconnected, case .idle = session.state {
-            return String(localized: "\(session.deviceName ?? "カメラ")・未接続")
+            return String(localized: "\(session.deviceName ?? String(localized: "カメラ"))・未接続")
         }
         switch session.state {
         case .idle: return String(localized: "未接続")

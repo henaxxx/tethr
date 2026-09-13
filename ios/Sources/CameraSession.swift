@@ -410,7 +410,7 @@ final class CameraSession: NSObject, ObservableObject {
 
     private func reopen(_ cam: ICCameraDevice, reason: String = "前面へ") {
         DebugLog.write("\(reason): セッションを開き直す")
-        state = .connecting(cam.name ?? "カメラ")
+        state = .connecting(cam.name ?? String(localized: "カメラ"))
         cam.requestOpenSession()
     }
 
@@ -1363,7 +1363,7 @@ extension CameraSession: ICDeviceBrowserDelegate {
             self.lastKnownFileCount = id.flatMap { UserDefaults.standard.object(forKey: "cardObjects.\($0)") as? Int }
             self.camera = cam
             cam.delegate = self
-            self.state = .connecting(cam.name ?? "カメラ")
+            self.state = .connecting(cam.name ?? String(localized: "カメラ"))
             DebugLog.write("カメラを検出: \(cam.name ?? "?") \(id ?? "?")")
             cam.requestOpenSession()
         }
@@ -1391,7 +1391,7 @@ extension CameraSession: ICCameraDeviceDelegate {
                 self.state = .failed(error.localizedDescription)
                 return
             }
-            self.state = .connected(device.name ?? "カメラ")
+            self.state = .connected(device.name ?? String(localized: "カメラ"))
             DebugLog.write("セッションを開いた")
             // つないで初めて開いたときと、手で接続し直したときだけ知らせる。背面から戻るたびには鳴らさない
             let announce = self.connectedAt == nil || self.announceNextOpen

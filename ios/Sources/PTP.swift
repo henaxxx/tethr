@@ -144,12 +144,12 @@ enum PTP {
         case 0x200A: return "DevicePropNotSupported"
         case 0x2019: return "DeviceBusy"
         case 0x201D: return "InvalidParameter"
-        case 0xA002: return "ピントが合いませんでした"
+        case 0xA002: return String(localized: "ピントが合いませんでした")
         case 0xA003: return "Nikon:ChangeCameraModeFailed"
         case 0xA004: return "Nikon:InvalidStatus"
         case 0xA005: return "Nikon:SetPropertyNotSupported"
         case 0xA00B: return "Nikon:NotLiveView"
-        case 0x0000: return "応答なし"
+        case 0x0000: return String(localized: "応答なし")
         default:     return String(format: "0x%04x", code)
         }
     }

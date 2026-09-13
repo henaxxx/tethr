@@ -302,7 +302,9 @@ final class CameraSession: NSObject, ObservableObject {
             eventLoop?.cancel()
             prefetchTask?.cancel()
             DebugLog.write("接続解除: セッションを閉じる")
-            cam.requestCloseSession(options: nil) { _ in }
+            cam.requestCloseSession(options: nil) { [weak self] _ in
+                Task { @MainActor in self?.sessionDidClose(cam) }
+            }
             state = .idle
         }
     }
@@ -338,7 +340,10 @@ final class CameraSession: NSObject, ObservableObject {
             if case .connected(let n) = state { state = .connecting(n) }
             DebugLog.write("背面へ: セッションを閉じる")
             cam.requestCloseSession(options: nil) { [weak self] _ in
-                Task { @MainActor in self?.endBackgroundTask() }
+                Task { @MainActor in
+                    self?.sessionDidClose(cam)
+                    self?.endBackgroundTask()
+                }
             }
         }
     }
@@ -353,6 +358,27 @@ final class CameraSession: NSObject, ObservableObject {
             reopenAfterClose = true
         } else {
             reopen(cam)
+        }
+    }
+
+    private var closeHandledAt: Date?
+
+    /// セッションが閉じた。
+    ///
+    /// 完了ハンドラ付きで閉じると、デリゲートの didCloseSession は呼ばれない（実機のログで一度も出ていなかった）。
+    /// そのため前回の終了時刻が残らず、背面から早く戻ったときの開き直しも走っていなかった。両方の経路からここに来る
+    private func sessionDidClose(_ device: ICDevice) {
+        UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
+        guard device === camera else { return }
+        // 万一両方の経路から届いても、開き直しの直後に「未接続」へ戻さないよう 1 回だけ扱う
+        if let last = closeHandledAt, Date().timeIntervalSince(last) < 2 { return }
+        closeHandledAt = Date()
+        DebugLog.write("セッションを閉じた")
+        if reopenAfterClose, let cam = camera {
+            reopenAfterClose = false
+            reopen(cam)
+        } else if !closedForBackground {
+            state = .idle
         }
     }
 
@@ -1294,17 +1320,7 @@ extension CameraSession: ICCameraDeviceDelegate {
     }
 
     nonisolated func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
-        Task { @MainActor in
-            UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
-            guard device === self.camera else { return }
-            DebugLog.write("セッションを閉じた")
-            if self.reopenAfterClose, let cam = self.camera {
-                self.reopenAfterClose = false
-                self.reopen(cam)
-            } else if !self.closedForBackground {
-                self.state = .idle
-            }
-        }
+        Task { @MainActor in self.sessionDidClose(device) }
     }
 
     nonisolated func didRemove(_ device: ICDevice) {

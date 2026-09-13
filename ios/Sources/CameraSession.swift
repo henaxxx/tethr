@@ -716,7 +716,47 @@ final class CameraSession: NSObject, ObservableObject {
         catalogProgress = 100
         progressTimer?.invalidate()
         DebugLog.write("読み込み完了: テザー \(liveShots.count) / カード \(cardShots.count)")
+        #if DEBUG
+        logCardLocationCoverage()
+        #endif
     }
+
+    #if DEBUG
+    /// 調査用。カード側のカットに位置が付いたか、付かなかったのはいつ撮ったものか。
+    /// 付かなかったカットは撮影時刻で固まりにまとめ、軌跡のいちばん近い点までの時間を添える
+    private func logCardLocationCoverage() {
+        guard geotagging, let first = geoLog.track.first?.time, let last = geoLog.track.last?.time else { return }
+        let shots = cardShots.compactMap { shot in shot.captured.map { (shot, $0.addingTimeInterval(clockDrift ?? 0)) } }
+            .sorted { $0.1 < $1.1 }
+        let inRange = shots.filter { $0.1 >= first.addingTimeInterval(-120) && $0.1 <= last.addingTimeInterval(120) }
+        let located = inRange.filter { $0.0.location != nil }.count
+        DebugLog.write("カード側の位置: 軌跡の期間内 \(inRange.count) 件中 \(located) 件に付いた（期間外 \(shots.count - inRange.count) 件）")
+        let f = DateFormatter()
+        f.dateFormat = "MM/dd HH:mm:ss"
+        var runs: [(from: Shot, fromTime: Date, to: Shot, toTime: Date, count: Int)] = []
+        for (shot, time) in inRange where shot.location == nil {
+            if let lastRun = runs.last, time.timeIntervalSince(lastRun.toTime) < 60 {
+                runs[runs.count - 1] = (lastRun.from, lastRun.fromTime, shot, time, lastRun.count + 1)
+            } else {
+                runs.append((shot, time, shot, time, 1))
+            }
+        }
+        for run in runs.prefix(20) {
+            let nearest = geoLog.track.map { abs($0.time.timeIntervalSince(run.fromTime)) }.min() ?? 0
+            DebugLog.write("  付かなかった: \(f.string(from: run.fromTime))〜\(f.string(from: run.toTime)) \(run.count) 件 "
+                           + "(\(run.from.name)〜\(run.to.name)) 軌跡の最寄り点まで \(Int(nearest / 60)) 分")
+        }
+        // 付いた固まりの中に、付かなかったカットが挟まっていないか（連写の虫食い）
+        var holes = 0
+        for i in inRange.indices.dropFirst().dropLast() where inRange[i].0.location == nil
+            && inRange[i - 1].0.location != nil && inRange[i + 1].0.location != nil
+            && inRange[i + 1].1.timeIntervalSince(inRange[i - 1].1) < 60 {
+            holes += 1
+            DebugLog.write("  虫食い: \(inRange[i].0.name) \(f.string(from: inRange[i].1))")
+        }
+        DebugLog.write("カード側の位置: 前後が付いているのに抜けたカット \(holes) 件")
+    }
+    #endif
 
     /// 抜かれたカメラの後始末。挿し直すとオブジェクトが作り直されるので、それに紐づく状態は捨てる。
     /// カットの一覧は残す。うっかりケーブルが抜けても、同じカメラなら続きから使えるように。

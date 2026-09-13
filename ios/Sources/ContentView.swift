@@ -60,7 +60,11 @@ struct StatusHeader: View {
             Text(text).font(.system(size: 12, weight: .medium)).lineLimit(1)
             Spacer(minLength: 6)
             if session.isConnected {
+                // M 以外では振れないので、場所は残したまま透明にする（ヘッダーの他の表示をずらさない）
                 LightMeterView(value: session.lightMeter)
+                    .opacity(session.lightMeterMeaningful ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.4), value: session.lightMeterMeaningful)
+                    .accessibilityHidden(!session.lightMeterMeaningful)
             }
             Spacer(minLength: 6)
             if let drift = session.clockCorrection, abs(drift) > 2 {

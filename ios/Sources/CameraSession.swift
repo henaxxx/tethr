@@ -34,6 +34,16 @@ final class CameraSession: NSObject, ObservableObject {
     @Published private(set) var busy = false
     /// 露出計の振れ（EV）。カメラが 1/6 EV 刻みの整数で持っている。
     @Published private(set) var lightMeter: Double?
+
+    /// 露出計が意味を持つか。
+    ///
+    /// Nikon の露出インジケータは M モードでだけ「適正露出からのずれ」を示す。
+    /// P・A・S ではカメラがシャッタースピードや絞りを自動で動かして適正に合わせるので振れない
+    /// （D300 で確認。半押しで変わるのは 0x500D だけで、0xD1B1 は動かなかった）。
+    /// 出しっぱなしにすると壊れているように見えるので、M 以外では隠す。
+    var lightMeterMeaningful: Bool {
+        props[.exposureProgram]?.current == 1   // PTP の ExposureProgramMode: 1 = Manual
+    }
     /// 撮影地点を記録するか。カメラ側には書けないので、
     /// 取り込み時に写真アプリへ渡す形で残す。
     /// 接続時に合わせたカメラ時計のずれ（秒）。正ならカメラが遅れていた。
@@ -513,6 +523,9 @@ final class CameraSession: NSObject, ObservableObject {
     /// 何も変わらない。変化を検知したらすぐ元の速さに戻す。
     private func runEventLoop() async {
         var quiet = 0
+        var blockedSince: Date?
+        var reportedBlock = false
+        DebugLog.write("露出計の問い合わせを開始")
         while !Task.isCancelled {
             let interval: Duration =
                 quiet > 12 ? .milliseconds(2000) :
@@ -520,14 +533,31 @@ final class CameraSession: NSObject, ObservableObject {
                              .milliseconds(350)
             try? await Task.sleep(for: interval)
 
-            guard isConnected else { return }
+            guard isConnected else {
+                DebugLog.write("露出計の問い合わせを終了（未接続）")
+                return
+            }
             // 画面が見えていない、撮影中、転送中は叩かない
-            guard !suspended, !pocketed, !busy, transferCount == 0 else { continue }
+            let blockers = [suspended ? "画面外" : nil, pocketed ? "ポケット" : nil,
+                            busy ? "撮影中" : nil, transferCount > 0 ? "転送中\(transferCount)" : nil].compactMap { $0 }
+            if !blockers.isEmpty {
+                // 止まっている理由が長く続いたら残す。止まったまま戻らない不具合を追うため
+                if blockedSince == nil { blockedSince = Date() }
+                if !reportedBlock, let since = blockedSince, Date().timeIntervalSince(since) > 8 {
+                    DebugLog.write("露出計の問い合わせを止めている: \(blockers.joined(separator: "・"))")
+                    reportedBlock = true
+                }
+                continue
+            }
+            if reportedBlock { DebugLog.write("露出計の問い合わせを再開") }
+            blockedSince = nil
+            reportedBlock = false
 
             let changed = await pollOnce()
             quiet = changed ? 0 : quiet + 1
         }
     }
+
 
     /// 露出計が画面に出ていないときは止める。
     /// 全画面プレビュー中やアプリが背面に回っている間がこれにあたる。
@@ -543,9 +573,18 @@ final class CameraSession: NSObject, ObservableObject {
             await readLightMeter()
             return before != lightMeter
         }
-        guard let data = try? await send(.nikonCheckEvent) else {
-            // 対応していない機種だった。以後は露出計だけ直接読む。
+        let data: Data
+        do {
+            data = try await send(.nikonCheckEvent)
+        } catch CameraError.ptp(0x2005) {
+            // OperationNotSupported。対応していない機種だった。以後は露出計だけ直接読む
             checkEventUsable = false
+            DebugLog.write("CheckEvent 非対応。露出計を直接読む方式に切り替え")
+            return false
+        } catch {
+            // ビジーやセッションの開け閉めと重なっただけ。次の回にまた聞く。
+            // 以前はここでも諦めていたため、一度の失敗で露出計が止まったままになっていた
+            DebugLog.write("CheckEvent 失敗（次回また試す）: \(describe(error))")
             return false
         }
         let changed = Self.changedProperties(in: data)
@@ -617,6 +656,18 @@ final class CameraSession: NSObject, ObservableObject {
     @discardableResult
     func send(_ op: PTP.Op, params: [UInt32] = [], outData: Data? = nil) async throws -> Data {
         guard let cam = camera else { throw CameraError.notConnected }
+        let label = String(format: "0x%04X", op.rawValue)
+        let started = Date()
+        let watchdog = Task {
+            try? await Task.sleep(for: .seconds(45))
+            guard !Task.isCancelled else { return }
+            DebugLog.write("PTP \(label) が45秒返らない（転送中\(transferCount)）")
+        }
+        defer {
+            watchdog.cancel()
+            let t = Date().timeIntervalSince(started)
+            if t > 45 { DebugLog.write(String(format: "PTP %@ がようやく返った（%.0f秒）", label, t)) }
+        }
         return try await withCheckedThrowingContinuation { cont in
             cam.requestSendPTPCommand(PTP.command(op, params: params), outData: outData) { data, response, error in
                 if let error {
@@ -692,7 +743,9 @@ final class CameraSession: NSObject, ObservableObject {
         await autofocus()
         do {
             try await send(.initiateCapture, params: [0, 0])
+            DebugLog.write("リモートシャッター 0x100E: OK")
         } catch {
+            DebugLog.write("リモートシャッター 0x100E 失敗: \(describe(error))")
             // 標準命令が通らない機種向けに Nikon 独自命令も試す
             if (try? await send(.nikonCapture, params: [0xFFFFFFFF])) == nil {
                 lastError = String(localized: "撮影できませんでした: \(describe(error))")
@@ -780,9 +833,23 @@ final class CameraSession: NSObject, ObservableObject {
     private func read(_ file: ICCameraFile, offset: off_t, length: off_t) async -> Data? {
         transferCount += 1
         defer { transferCount -= 1 }
+        let name = file.name ?? "?"
         return await withCheckedContinuation { cont in
-            file.requestReadData(atOffset: offset, length: length) { data, _ in
+            let once = ResumeOnce()
+            file.requestReadData(atOffset: offset, length: length) { data, error in
+                guard once.claim() else {
+                    DebugLog.write("打ち切った読み出しが後から返った: \(name)")
+                    return
+                }
+                if data == nil { DebugLog.write("読み出し失敗: \(name) @\(offset) \(error.map { "\($0)" } ?? "")") }
                 cont.resume(returning: data)
+            }
+            // 1.5MB ほどの埋め込み JPEG でも数秒で終わる。返ってこないものは諦める
+            Task {
+                try? await Task.sleep(for: .seconds(60))
+                guard once.claim() else { return }
+                DebugLog.write("読み出しが60秒返らないので打ち切り: \(name) @\(offset) 長さ \(length)")
+                cont.resume(returning: nil)
             }
         }
     }
@@ -931,6 +998,7 @@ extension CameraSession: ICCameraDeviceDelegate {
             }
             await self.countObjects()
             self.scheduleCatalogSettle()
+            self.checkEventUsable = true
             self.startEventPolling()
             await self.refreshProps()
         }
@@ -1032,5 +1100,18 @@ extension CameraSession: ICCameraDeviceDelegate {
             self.frameworkCatalogDone = true
             self.scheduleCatalogSettle()
         }
+    }
+}
+
+
+/// 完了とタイムアウトのどちらか先に来た方だけを通す
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return false }
+        done = true
+        return true
     }
 }

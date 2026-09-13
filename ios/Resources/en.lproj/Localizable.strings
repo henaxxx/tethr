@@ -81,3 +81,5 @@
 "完了" = "Done";
 "消去" = "Clear";
 "やめる" = "Cancel";
+
+"カメラが取り外されました" = "Camera disconnected";

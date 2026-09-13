@@ -58,6 +58,41 @@ final class CameraSession: NSObject, ObservableObject {
     private var thumbnailRequested: Set<String> = []
     private var previewRequested: Set<String> = []
     private var progressTimer: Timer?
+
+    // 「接続後に撮ったカットか」を、読み込み完了の合図で決めてはいけない。
+    // 実機で確かめたところ、USB を抜き差しした直後は完了の合図がフォルダ分だけの時点で先に届き、
+    // 写真はその後 45 秒かけて届く。合図を信じるとカードの古いカットが全部テザー側に流れ込み、
+    // 現在地まで付いてしまう。逆に読み込み中に撮ったカットはカード側へ迷子になる。
+    // そこで libgphoto2 と同じく、接続した時点のオブジェクトハンドルを控えておき、
+    // それに無いものを接続後に撮ったとみなす。撮影の瞬間に届く ObjectAdded も併用する。
+
+    /// 接続した時点でカメラにあったオブジェクト。同じ ICCameraDevice の間は取り直さない
+    private var initialHandles: Set<UInt32>?
+    /// GetObjectHandles が通らない機種。フレームワークの判定に頼る
+    private var handlesUnavailable = false
+    /// ハンドルを控える前に届いたファイル。判定できるようになってから流す
+    private var pendingFiles: [ICCameraFile] = []
+    /// 控えたハンドルとファイルの ptpObjectHandle が同じ番号体系かを、最初の 20 件で確かめる。
+    /// 食い違っていたら、カードの全カットが「接続後に撮った」判定になり現在地まで付いてしまう。
+    /// 確かめ終わるまでは一覧に出さずに溜めておく（0.1 秒おきに届くので 2 秒ほど）
+    private var handlesVerified = false
+    private var verifyBuffer: [ICCameraFile] = []
+    /// didAdd で届いたハンドル。読み込みの進み具合を数える
+    private var seenHandles: Set<UInt32> = []
+    /// 撮影の瞬間に ObjectAdded で知らされたハンドルと、その瞬間の位置。
+    /// セッションを閉じている間も届く（実機で確認）
+    private var announcedHandles: Set<UInt32> = []
+    private var announcedLocations: [UInt32: CLLocation] = [:]
+    /// フレームワークが完了を告げたか。これだけでは完了とみなさない
+    private var frameworkCatalogDone = false
+    private var catalogSettle: Task<Void, Never>?
+    /// 前につないでいたカメラ。同じカメラが挿し直されたら一覧を保つ
+    private var lastCameraID: String?
+    /// 背面に回るとき自分で閉じた。前面に戻ったら開き直す
+    private var closedForBackground = false
+    /// 閉じ終わる前に前面へ戻ってきた
+    private var reopenAfterClose = false
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var eventLoop: Task<Void, Never>?
     /// 画面が見えていない、あるいは露出計が出ていない間は問い合わせない
     private var suspended = false
@@ -127,23 +162,224 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
+    /// セッションを閉じる。カメラの参照は保つので、同じカメラなら開き直しは一瞬で済む。
     func disconnect() {
-        camera?.requestCloseSession()
+        guard let cam = camera else { return }
+        eventLoop?.cancel()
+        cam.requestCloseSession()
+        state = .idle
+    }
+
+    // MARK: 前面と背面
+
+    /// 背面に回るときはセッションを自分で閉じる。
+    ///
+    /// 開いたまま iOS に落とされると、カメラ側に接続が半開きで残り、
+    /// 次の接続で 20〜36 秒待たされる。行儀よく閉じておけば 7 秒で済む。
+    /// 同じカメラのままなら、開き直しは 0.1 秒（いずれも D300 の実測）。
+    func appDidEnterBackground() {
+        guard let cam = camera, cam.hasOpenSession else { return }
+        closedForBackground = true
+        eventLoop?.cancel()
+        if case .connected(let n) = state { state = .connecting(n) }
+        DebugLog.write("背面へ: セッションを閉じる")
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "close-camera-session") { [weak self] in
+            Task { @MainActor in self?.endBackgroundTask() }
+        }
+        cam.requestCloseSession(options: nil) { [weak self] _ in
+            Task { @MainActor in self?.endBackgroundTask() }
+        }
+    }
+
+    func appDidBecomeActive() {
+        guard closedForBackground, let cam = camera else { return }
+        closedForBackground = false
+        if cam.hasOpenSession {
+            reopenAfterClose = true
+        } else {
+            reopen(cam)
+        }
+    }
+
+    private func reopen(_ cam: ICCameraDevice) {
+        DebugLog.write("前面へ: セッションを開き直す")
+        state = .connecting(cam.name ?? "カメラ")
+        cam.requestOpenSession()
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
+    // MARK: カードの中身
+
+    /// 接続した時点でカメラにあるオブジェクトを控える。
+    /// 準備完了までは待たされるが、その間に届いたファイルは溜めてあるので取りこぼさない。
+    private func captureInitialHandles() async {
+        let cam = camera
+        do {
+            let data = try await send(.getObjectHandles, params: [0xFFFF_FFFF, 0, 0])
+            guard cam === camera else { return }
+            var r = PTPReader(data)
+            if let n = r.read(UInt32.self), n <= 200_000 {
+                var set = Set<UInt32>(minimumCapacity: Int(n))
+                for _ in 0..<n {
+                    guard let h = r.read(UInt32.self) else { break }
+                    set.insert(h)
+                }
+                initialHandles = set
+                // 枚数が少ないカードでは照合しようがないので、そのまま信じる
+                handlesVerified = set.count < 20
+                DebugLog.write("接続時のハンドル \(set.count) 件を控えた")
+            } else {
+                handlesUnavailable = true
+            }
+        } catch {
+            guard cam === camera else { return }
+            handlesUnavailable = true
+            DebugLog.write("GetObjectHandles 不可、フレームワークの判定に切り替え: \(error)")
+        }
+        let files = pendingFiles
+        pendingFiles = []
+        route(files)
+        scheduleCatalogSettle()
+    }
+
+    /// 番号体系を確かめ終えるまでは溜め、確かめたら一覧へ流す
+    private func route(_ files: [ICCameraFile]) {
+        guard initialHandles != nil, !handlesVerified else {
+            ingest(files)
+            return
+        }
+        verifyBuffer.append(contentsOf: files)
+        if verifyBuffer.count >= 20 { settleVerification() }
+    }
+
+    private func settleVerification() {
+        guard !handlesVerified else { return }
+        handlesVerified = true
+        let held = verifyBuffer
+        verifyBuffer = []
+        if let initial = initialHandles, !held.isEmpty {
+            let matched = held.filter { initial.contains($0.ptpObjectHandle) }.count
+            if matched == 0 && held.count >= 5 {
+                DebugLog.write("ハンドルの番号体系が一致しない（\(held.count) 件中 0 件）。フレームワークの判定に切り替え")
+                initialHandles = nil
+                handlesUnavailable = true
+            } else {
+                DebugLog.write("ハンドル照合 OK（\(held.count) 件中 \(matched) 件が接続時から存在）")
+            }
+        }
+        ingest(held)
+    }
+
+    /// 接続後に撮られたカットか
+    private func isShotAfterConnecting(_ file: ICCameraFile) -> Bool {
+        let h = file.ptpObjectHandle
+        if announcedHandles.contains(h) { return true }
+        if let initial = initialHandles { return !initial.contains(h) }
+        return file.wasAddedAfterContentCatalogCompleted || catalogReady
+    }
+
+    /// 届いたファイルを一覧に振り分ける
+    private func ingest(_ files: [ICCameraFile]) {
+        guard !files.isEmpty else { return }
+        var listed = Set(liveShots.map(\.name)).union(cardShots.map(\.name))
+        var live: [Shot] = []
+        var card: [Shot] = []
+        for file in files {
+            guard let name = file.name else { continue }
+            // 開き直しや挿し直しでは、同じファイルが別のオブジェクトで届き直す。参照は新しい方へ
+            fileIndex[name] = file
+            guard !listed.contains(name) else { continue }
+            listed.insert(name)
+
+            var shot = Shot(name: name, size: Int(file.fileSize), captured: file.creationDate)
+            if isShotAfterConnecting(file) {
+                // 撮った瞬間の位置があればそれを使う。無ければいまの位置（撮影から数秒以内に届くため）
+                let known = announcedLocations[file.ptpObjectHandle] ?? geoLog.shots[name]?.location
+                if geotagging, let here = known ?? location.current {
+                    shot.location = here
+                    if geoLog.shots[name] == nil { geoLog.recordShot(name, at: here) }
+                }
+                live.append(shot)
+                DebugLog.write("テザー側: \(name) handle=\(String(format: "0x%08X", file.ptpObjectHandle)) 通知\(announcedHandles.contains(file.ptpObjectHandle) ? "あり" : "なし")")
+            } else {
+                card.append(shot)
+            }
+        }
+        if !live.isEmpty {
+            liveShots.insert(contentsOf: live.sorted { $0.name > $1.name }, at: 0)
+            selection = liveShots.first?.id
+            for shot in live { requestThumbnail(for: shot) }
+        }
+        if !card.isEmpty {
+            cardShots.append(contentsOf: card)
+            if catalogReady { cardShots.sort { $0.name > $1.name } }
+        }
+    }
+
+    /// 完了の合図のあと、ファイルの到着が 1.5 秒途切れたら完了とみなす。
+    /// 抜き差し直後は合図が先走り、その後もファイルが 0.1 秒おきに届き続けるため。
+    private func scheduleCatalogSettle() {
+        guard frameworkCatalogDone, !catalogReady,
+              initialHandles != nil || handlesUnavailable else { return }
+        catalogSettle?.cancel()
+        catalogSettle = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard !Task.isCancelled else { return }
+            self?.finishCatalog()
+        }
+    }
+
+    private func finishCatalog() {
+        guard !catalogReady else { return }
+        // 20 件に満たないまま読み終わった場合も、溜めた分を判定して流す
+        settleVerification()
+        // 挿し直しの間にカードが替わっていたら、もう無いカットを外す（取り込み済みは残す）。
+        // 完了の判定が早すぎた場合に、まだ届いていないだけのカットを消さないよう、
+        // 届いた数が控えたハンドル数にほぼ達しているときに限る（フォルダは届かないことがあるので少し見逃す）
+        if let initial = initialHandles, seenHandles.count + 10 >= initial.count {
+            liveShots.removeAll { fileIndex[$0.name] == nil && $0.localURL == nil }
+            cardShots.removeAll { fileIndex[$0.name] == nil && $0.localURL == nil }
+        }
+        cardShots.sort { $0.name > $1.name }
+        catalogReady = true
+        catalogProgress = 100
+        progressTimer?.invalidate()
+        DebugLog.write("読み込み完了: テザー \(liveShots.count) / カード \(cardShots.count)")
+    }
+
+    /// 抜かれたカメラの後始末。挿し直すとオブジェクトが作り直されるので、それに紐づく状態は捨てる。
+    /// カットの一覧は残す。うっかりケーブルが抜けても、同じカメラなら続きから使えるように。
+    private func forgetDevice() {
         camera = nil
-        liveShots = []
-        cardShots = []
+        fileIndex = [:]
+        initialHandles = nil
+        handlesUnavailable = false
+        pendingFiles = []
+        handlesVerified = false
+        verifyBuffer = []
+        seenHandles = []
+        announcedHandles = []
+        announcedLocations = [:]
+        frameworkCatalogDone = false
+        catalogSettle?.cancel()
         catalogReady = false
+        catalogProgress = 0
+        closedForBackground = false
+        reopenAfterClose = false
         thumbnailRequested = []
         previewRequested = []
         progressTimer?.invalidate()
         eventLoop?.cancel()
-        geoLog.save()
-        lightMeter = nil
-        clockCorrection = nil
         transferCount = 0
-        fileIndex = [:]
+        lightMeter = nil
         props = [:]
-        state = .idle
+        geoLog.save()
+        DebugLog.write("カメラが外れた")
     }
 
     /// カメラの内蔵時計を端末に合わせる。
@@ -274,13 +510,18 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// カタログ読み込みの進捗を拾って画面に出す。
     /// 何も出ないと「固まった」ように見えるため。
+    /// フレームワークの百分率は挿し直し後に先走るので、控えたハンドルの到着数で数える。
     private func startProgressWatch() {
         progressTimer?.invalidate()
         progressTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] timer in
             Task { @MainActor in
-                guard let self, let cam = self.camera else { timer.invalidate(); return }
-                self.catalogProgress = Int(cam.contentCatalogPercentCompleted)
-                if self.catalogReady { timer.invalidate() }
+                guard let self, let cam = self.camera, !self.catalogReady else { timer.invalidate(); return }
+                if let initial = self.initialHandles, !initial.isEmpty {
+                    let loaded = initial.intersection(self.seenHandles).count
+                    self.catalogProgress = min(99, loaded * 100 / initial.count)
+                } else {
+                    self.catalogProgress = min(99, Int(cam.contentCatalogPercentCompleted))
+                }
             }
         }
     }
@@ -391,7 +632,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// 一括で要求すると 1 枚ごとに PTP の往復が走り、USB 2.0 が飽和して
     /// 他の操作まで待たされる。表示に必要な分だけ、遅延で取る。
     func requestThumbnail(for shot: Shot) {
-        guard !thumbnailRequested.contains(shot.name),
+        guard shot.thumbnail == nil, !thumbnailRequested.contains(shot.name),
               let file = fileIndex[shot.name] else { return }
         thumbnailRequested.insert(shot.name)
         // 一覧用は小さくてよい。大きく要求すると転送量が増えて一覧の描画が遅れる。
@@ -416,7 +657,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// 埋め込まれているので、ファイル構造を解析してその範囲だけを読む。
     /// 11MB 全体を落とさずに済む。
     func requestPreview(for shot: Shot) {
-        guard let file = fileIndex[shot.name] else { return }
+        guard shot.preview == nil, let file = fileIndex[shot.name] else { return }
         if previewRequested.contains(shot.name) { return }
         previewRequested.insert(shot.name)
 
@@ -543,9 +784,18 @@ extension CameraSession: ICDeviceBrowserDelegate {
     nonisolated func deviceBrowser(_ browser: ICDeviceBrowser, didAdd device: ICDevice, moreComing: Bool) {
         Task { @MainActor in
             guard self.camera == nil, let cam = device as? ICCameraDevice else { return }
+            let id = cam.uuidString
+            if id == nil || id != self.lastCameraID {
+                // 別のカメラ。前のカメラの一覧は持ち越さない
+                self.liveShots = []
+                self.cardShots = []
+                self.selection = nil
+            }
+            self.lastCameraID = id
             self.camera = cam
             cam.delegate = self
             self.state = .connecting(cam.name ?? "カメラ")
+            DebugLog.write("カメラを検出: \(cam.name ?? "?") \(id ?? "?")")
             cam.requestOpenSession()
         }
     }
@@ -553,8 +803,8 @@ extension CameraSession: ICDeviceBrowserDelegate {
     nonisolated func deviceBrowser(_ browser: ICDeviceBrowser, didRemove device: ICDevice, moreGoing: Bool) {
         Task { @MainActor in
             guard device === self.camera else { return }
-            self.camera = nil
-            self.state = .failed("カメラが取り外されました")
+            self.forgetDevice()
+            self.state = .failed(String(localized: "カメラが取り外されました"))
         }
     }
 }
@@ -564,61 +814,63 @@ extension CameraSession: ICDeviceBrowserDelegate {
 extension CameraSession: ICCameraDeviceDelegate {
 
     nonisolated func device(_ device: ICDevice, didOpenSessionWithError error: (any Error)?) {
+        let opened = Date()
         Task { @MainActor in
+            guard device === self.camera else { return }
             if let error {
                 self.state = .failed(error.localizedDescription)
-            } else {
-                self.state = .connected(device.name ?? "カメラ")
-                self.startProgressWatch()
-                await self.syncClock()
-                self.startEventPolling()
-                await self.refreshProps()
+                return
             }
+            self.state = .connected(device.name ?? "カメラ")
+            DebugLog.write("セッションを開いた")
+            if !self.catalogReady { self.startProgressWatch() }
+            if self.initialHandles == nil && !self.handlesUnavailable {
+                await self.captureInitialHandles()
+                DebugLog.write(String(format: "ハンドル取得まで %.1f 秒", Date().timeIntervalSince(opened)))
+            }
+            await self.syncClock()
+            self.startEventPolling()
+            await self.refreshProps()
         }
     }
 
     nonisolated func device(_ device: ICDevice, didCloseSessionWithError error: (any Error)?) {
-        Task { @MainActor in self.state = .idle }
+        Task { @MainActor in
+            guard device === self.camera else { return }
+            DebugLog.write("セッションを閉じた")
+            if self.reopenAfterClose, let cam = self.camera {
+                self.reopenAfterClose = false
+                self.reopen(cam)
+            } else if !self.closedForBackground {
+                self.state = .idle
+            }
+        }
     }
 
     nonisolated func didRemove(_ device: ICDevice) {
         Task { @MainActor in
-            self.camera = nil
+            guard device === self.camera else { return }
+            self.forgetDevice()
             self.state = .idle
         }
     }
 
-    nonisolated func deviceDidBecomeReady(_ device: ICDevice) {}
+    nonisolated func deviceDidBecomeReady(_ device: ICDevice) {
+        Task { @MainActor in DebugLog.write("準備完了") }
+    }
 
     nonisolated func cameraDevice(_ camera: ICCameraDevice, didAdd items: [ICCameraItem]) {
+        let handles = items.map(\.ptpObjectHandle)
         let files = items.compactMap { $0 as? ICCameraFile }
         Task { @MainActor in
-            var added: [Shot] = []
-            for file in files {
-                guard let name = file.name else { continue }
-                if self.fileIndex[name] != nil { continue }
-                self.fileIndex[name] = file
-                var shot = Shot(name: name, size: Int(file.fileSize), captured: file.creationDate)
-                // 撮影から 1〜2 秒で届くので、いまの位置が撮影地点とみなせる。
-                // 取り込みが後回しになっても、この時点の位置が残る。
-                if self.catalogReady, self.geotagging, let here = self.location.current {
-                    shot.location = here
-                    // ファイル名で確定した位置として控える。
-                    // 時刻の突き合わせが不要になるぶん、誤差が入らない。
-                    self.geoLog.recordShot(name, at: here)
-                }
-                added.append(shot)
-            }
-            guard !added.isEmpty else { return }
-            if self.catalogReady {
-                // 接続後に撮られたカット。これがテザー撮影の本体。
-                self.liveShots.insert(contentsOf: added.sorted { $0.name > $1.name }, at: 0)
-                self.selection = self.liveShots.first?.id
-                for shot in added { self.requestThumbnail(for: shot) }
+            guard camera === self.camera else { return }
+            self.seenHandles.formUnion(handles)
+            if self.initialHandles == nil && !self.handlesUnavailable {
+                self.pendingFiles.append(contentsOf: files)
             } else {
-                // 起動時のカタログ読み込み。ここでサムネイルは取らない。
-                self.cardShots.append(contentsOf: added)
+                self.route(files)
             }
+            self.scheduleCatalogSettle()
         }
     }
 
@@ -630,22 +882,41 @@ extension CameraSession: ICCameraDeviceDelegate {
     nonisolated func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) {}
     nonisolated func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {}
 
-    /// 撮影完了などのイベント。撮影直後は設定が変わっていることがあるので読み直す。
+    /// カメラから届く PTP イベント。
+    ///   uint32 長さ / uint16 種別 / uint16 コード / uint32 トランザクション / uint32 引数1
     nonisolated func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {
-        guard eventData.count >= 8 else { return }
-        let code = UInt16(eventData[eventData.startIndex + 6]) | (UInt16(eventData[eventData.startIndex + 7]) << 8)
-        guard code == 0x400D else { return }   // CaptureComplete
-        Task { @MainActor in await self.refreshProps() }
+        let b = [UInt8](eventData)
+        guard b.count >= 8 else { return }
+        let code = UInt16(b[6]) | UInt16(b[7]) << 8
+        let param: UInt32? = b.count >= 16
+            ? UInt32(b[12]) | UInt32(b[13]) << 8 | UInt32(b[14]) << 16 | UInt32(b[15]) << 24
+            : nil
+        Task { @MainActor in
+            guard camera === self.camera else { return }
+            switch code {
+            case 0x4002:
+                // ObjectAdded。撮った瞬間に届くので、この時点の位置が撮影地点になる
+                guard let h = param else { return }
+                self.announcedHandles.insert(h)
+                if self.geotagging, let here = self.location.current { self.announcedLocations[h] = here }
+                DebugLog.write("撮影通知 handle=\(String(format: "0x%08X", h))")
+            case 0x400D:
+                // CaptureComplete。撮影直後は設定が変わっていることがあるので読み直す
+                await self.refreshProps()
+            default:
+                break
+            }
+        }
     }
 
-    /// カード全体の読み込みが終わった合図。
-    /// これ以降に届くファイルが「接続中に撮ったカット」になる。
+    /// フレームワークが「読み込み完了」と言ってきた。
+    /// 挿し直し直後は先走るので、到着が落ち着くまで待ってから完了にする。
     nonisolated func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
         Task { @MainActor in
-            self.cardShots.sort { $0.name > $1.name }
-            self.catalogReady = true
-            self.catalogProgress = 100
-            self.progressTimer?.invalidate()
+            guard device === self.camera else { return }
+            DebugLog.write("フレームワークの完了通知（この時点 \(self.seenHandles.count) 件）")
+            self.frameworkCatalogDone = true
+            self.scheduleCatalogSettle()
         }
     }
 }

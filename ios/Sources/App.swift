@@ -13,6 +13,11 @@ struct TethrTouchApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     // 背面に回っている間はカメラに問い合わせない
                     session.setPollingSuspended(phase != .active)
+                    switch phase {
+                    case .background: session.appDidEnterBackground()
+                    case .active: session.appDidBecomeActive()
+                    default: break
+                    }
                 }
         }
     }

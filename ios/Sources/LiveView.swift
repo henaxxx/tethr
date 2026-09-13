@@ -10,7 +10,10 @@ import UIKit
 ///
 /// 気をつけること（どれも実機で確かめた、または libgphoto2 のソースにある）
 /// - カードの読み込みが終わるまでは、開始が OK でも映像が返らない（NotLiveView）
-/// - 記録先を SDRAM にしたまま撮るとカードに残らない。撮る直前と止めるときに必ずカードへ戻す
+/// - D300 は記録先がカードのままだと開始を拒否する（禁止条件 0x00000001）。SDRAM に切り替えると通る
+/// - 記録先を SDRAM にしたまま撮るとカードに残らない。撮るときはライブビューをいったん止めてカードへ戻す
+///   （ライブビューを付けたまま記録先だけ戻して切ったら、シャッター音が 3 回鳴って画像が届かず、
+///    以後ライブビューが開始できなくなった）
 /// - 止める命令を省くとミラーが上がったまま残る（Mac 版で確認）
 /// - レリーズモードダイヤルが Lv だとカメラが開始を拒否する
 @MainActor
@@ -19,6 +22,8 @@ final class LiveViewController: ObservableObject {
     enum State: Equatable { case off, starting, on, stopping }
 
     @Published private(set) var state: State = .off
+    /// 撮影のために一時的に止めている。映像は最後のコマのまま
+    @Published private(set) var suspended = false
     /// 映像は毎秒 27 回変わるので、画面全体を描き直さないよう別の観測対象に分ける
     let feed = LiveFeed()
     weak var session: CameraSession?
@@ -48,12 +53,17 @@ final class LiveViewController: ObservableObject {
         guard state == .off, let s = session, s.isConnected, s.catalogReady, !s.pocketed else { return }
         state = .starting
         stopRequested = false
-        DebugLog.write("ライブビュー: 開始")
+        await logWithState("ライブビュー: 開始")
         let key = "liveViewNeedsSDRAM.\(s.cameraIdentifier ?? "?")"
 
         do {
             // 制御権をホストへ。ChangeCameraModeFailed は libgphoto2 も無視して進む
-            do { try await s.send(.nikonChangeCameraMode, params: [1]) } catch CameraError.ptp(0xA003) {}
+            do {
+                try await s.send(.nikonChangeCameraMode, params: [1])
+                DebugLog.write("ライブビュー: 制御権 OK")
+            } catch CameraError.ptp(0xA003) {
+                DebugLog.write("ライブビュー: 制御権 ChangeCameraModeFailed（続行）")
+            }
             tookControl = true
             try checkStop()
 
@@ -96,17 +106,35 @@ final class LiveViewController: ObservableObject {
     /// 開始の命令を送り、準備ができるのを待ってから最初の 1 コマが取れるか確かめる
     private func beginAndWaitForFrame() async throws -> Bool {
         guard let s = session else { return false }
-        do {
-            try await s.send(.nikonStartLiveView)
-        } catch CameraError.ptp(0x2019) {
-            // DeviceBusy は libgphoto2 も成功扱いにして待つ
-        }
-        // ミラーが上がって準備ができるまで（D300 で 3 秒ほど）
-        for _ in 0..<50 {
+        // 撮影の直後などでまだ手が離せないうちに開始すると断られるので、先に落ち着くのを待つ
+        await s.waitUntilReady(seconds: 3)
+        var attempt = 0
+        while true {
             try checkStop()
-            if (try? await s.send(.nikonDeviceReady)) != nil { break }
-            try? await Task.sleep(for: .milliseconds(100))
+            attempt += 1
+            do {
+                try await s.send(.nikonStartLiveView)
+                DebugLog.write("ライブビュー: 開始命令 OK")
+                break
+            } catch CameraError.ptp(0x2019) {
+                // DeviceBusy は libgphoto2 も成功扱いにして待つ
+                DebugLog.write("ライブビュー: 開始命令 DeviceBusy（待つ）")
+                break
+            } catch CameraError.ptp(let code) {
+                // カメラが開始そのものを拒否した。記録先がカードのままだと D300 はここで即座に断る
+                // （禁止条件 0x00000001）。それは呼び出し側が SDRAM に切り替えて再試行する
+                let condition = await readProhibitCondition()
+                await logWithState("ライブビュー: 開始命令を拒否された \(PTP.responseName(code))（\(attempt) 回目）")
+                // 撮影後の書き込み中（ビット 15）や、理由が出ていないだけのときは少し待てば通ることがある
+                let settling = condition.map { $0 & ~(1 << 15) == 0 } ?? false
+                guard settling, attempt < 8 else { return false }
+                try? await Task.sleep(for: .milliseconds(500))
+                await s.waitUntilReady(seconds: 2)
+            }
         }
+        // ミラーが上がって準備ができるまで（D300 で 1 秒ほど）
+        try checkStop()
+        await s.waitUntilReady(seconds: 5)
         for _ in 0..<15 {
             try checkStop()
             do {
@@ -165,14 +193,57 @@ final class LiveViewController: ObservableObject {
         }
     }
 
-    /// 撮影の間はコマ取りを止め、記録先をカードに戻しておく。撮り終えたら元に戻す
-    func whilePaused<T>(_ body: () async -> T) async -> T {
+    /// 撮影の間はライブビューを止めて、記録先をカードに戻しておく。撮り終えたら開き直す。
+    ///
+    /// ライブビューを付けたまま記録先だけカードに戻して切ると、D300 はシャッター音が 3 回鳴り、
+    /// 画像が届かず、そのあとライブビューを開始できなくなった。D300 本体もライブビュー中の撮影では
+    /// ミラーを下ろすので、止めてから普段どおりに撮るのが一番確実
+    func whileSuspended(_ body: () async -> Void) async {
+        guard state == .on, let s = session else { return await body() }
         pauseCount += 1
-        if switchedToSDRAM { try? await writeMedia(sdram: false) }
-        let result = await body()
-        if switchedToSDRAM, state == .on { try? await writeMedia(sdram: true) }
-        pauseCount -= 1
-        return result
+        suspended = true
+        defer {
+            suspended = false
+            pauseCount = max(0, pauseCount - 1)
+        }
+        DebugLog.write("ライブビュー: 撮影のため止める")
+        do {
+            try await s.send(.nikonEndLiveView)
+        } catch {
+            DebugLog.write("ライブビュー: 終了命令 失敗 \(error)")
+        }
+        await s.waitUntilReady(seconds: 3)
+        if switchedToSDRAM {
+            do {
+                try await writeMedia(sdram: false)
+            } catch {
+                // カードに戻せないまま切ると SDRAM にしか残らない。撮らずにやめる
+                await logWithState("ライブビュー: 記録先をカードに戻せない \(error)")
+                s.lastError = String(localized: "記録先をカードに戻せなかったため、撮影をやめました。")
+                await stop(reason: "記録先をカードに戻せない")
+                return
+            }
+        }
+        await logWithState("ライブビュー: 撮影前")
+
+        await body()
+
+        // 露光とカードへの書き込みが終わるまでビジーが続く
+        await s.waitUntilReady(seconds: 60)
+        // 撮っている間にボタンやケーブル抜けで止められていたら、開き直さない
+        guard state == .on else { return }
+        do {
+            if switchedToSDRAM { try await writeMedia(sdram: true) }
+            if try await beginAndWaitForFrame() {
+                DebugLog.write("ライブビュー: 撮影後に再開")
+                return
+            }
+        } catch {
+            DebugLog.write("ライブビュー: 撮影後の再開で失敗 \(error)")
+        }
+        suspended = false
+        pauseCount = 0
+        await stop(reason: "撮影後に開き直せなかった")
     }
 
     // MARK: 停止
@@ -199,15 +270,28 @@ final class LiveViewController: ObservableObject {
     /// 止める命令を必ず送り、記録先と制御権をカメラに返す
     private func teardown() async {
         guard let s = session, s.isConnected else { return }
-        try? await s.send(.nikonEndLiveView)
+        var steps: [String] = []
+        func run(_ label: String, _ work: () async throws -> Void) async {
+            do {
+                try await work()
+                steps.append("\(label) OK")
+            } catch CameraError.ptp(let code) {
+                steps.append("\(label) \(PTP.responseName(code))")
+            } catch {
+                steps.append("\(label) \(error)")
+            }
+        }
+        await run("終了") { try await s.send(.nikonEndLiveView) }
+        await s.waitUntilReady(seconds: 3)
         if switchedToSDRAM {
-            try? await writeMedia(sdram: false)
+            await run("カードへ") { try await self.writeMedia(sdram: false) }
             switchedToSDRAM = false
         }
         if tookControl {
-            try? await s.send(.nikonChangeCameraMode, params: [0])
+            await run("制御権を返す") { try await s.send(.nikonChangeCameraMode, params: [0]) }
             tookControl = false
         }
+        await logWithState("ライブビュー: 後始末 \(steps.joined(separator: " / "))")
     }
 
     private func finishStopping() {
@@ -232,6 +316,7 @@ final class LiveViewController: ObservableObject {
     private func setMedia(sdram: Bool) async throws {
         try await writeMedia(sdram: sdram)
         switchedToSDRAM = sdram
+        DebugLog.write("ライブビュー: 記録先を \(sdram ? "SDRAM" : "カード") に")
     }
 
     private func writeMedia(sdram: Bool) async throws {
@@ -256,14 +341,46 @@ final class LiveViewController: ObservableObject {
 
     enum LiveViewFailure: Error { case noFrames, stopped }
 
+    private func readProhibitCondition() async -> UInt32? {
+        guard let s = session,
+              let d = try? await s.send(.getDevicePropValue, params: [Self.prohibitCondition]), d.count >= 4 else { return nil }
+        return UInt32(d[d.startIndex]) | UInt32(d[d.startIndex + 1]) << 8
+             | UInt32(d[d.startIndex + 2]) << 16 | UInt32(d[d.startIndex + 3]) << 24
+    }
+
+    private func logWithState(_ message: String) async {
+        let state = await cameraState()
+        DebugLog.write("\(message) \(state)")
+    }
+
+    /// ログ用。カメラ側から見たライブビューの状態、記録先、禁止条件、DeviceReady の応答
+    private func cameraState() async -> String {
+        guard let s = session else { return "" }
+        func byte(_ prop: UInt32) async -> String {
+            guard let d = try? await s.send(.getDevicePropValue, params: [prop]), let b = d.first else { return "?" }
+            return String(b)
+        }
+        let status = await byte(Self.liveViewStatus)
+        let media = await byte(Self.recordingMedia)
+        let condition = await readProhibitCondition().map { String(format: "0x%08X", $0) } ?? "?"
+        let ready: String
+        do {
+            try await s.send(.nikonDeviceReady)
+            ready = "OK"
+        } catch CameraError.ptp(let code) {
+            ready = PTP.responseName(code)
+        } catch {
+            ready = "\(error)"
+        }
+        return "[LV=\(status) 記録先=\(media) 禁止=\(condition) Ready=\(ready)]"
+    }
+
     /// 開始できなかった理由を、カメラの禁止条件（libgphoto2 のビット定義）から言葉にする
     private func explain(_ error: Error) async -> String {
-        guard let s = session,
-              let d = try? await s.send(.getDevicePropValue, params: [Self.prohibitCondition]), d.count >= 4 else {
+        DebugLog.write("ライブビュー: 失敗の元 \(error)")
+        guard let bits = await readProhibitCondition() else {
             return String(localized: "ライブビューを開始できませんでした。レリーズモードダイヤルが Lv になっていないか確認してください。")
         }
-        let bits = UInt32(d[d.startIndex]) | UInt32(d[d.startIndex + 1]) << 8
-                 | UInt32(d[d.startIndex + 2]) << 16 | UInt32(d[d.startIndex + 3]) << 24
         func has(_ bit: Int) -> Bool { bits & (1 << bit) != 0 }
         if has(8)  { return String(localized: "カメラの電池が足りないため、ライブビューを開始できません。") }
         if has(17) { return String(localized: "カメラの温度が上がっているため、ライブビューを開始できません。しばらく休ませてください。") }
@@ -334,7 +451,7 @@ struct PreviewSwitcher: View {
             if live.state == .off {
                 ShotPreviewArea()
             } else {
-                LivePane(feed: live.feed, stopping: live.state == .stopping) { fullScreen = true }
+                LivePane(feed: live.feed, stopping: live.state == .stopping, shooting: live.suspended) { fullScreen = true }
             }
             LiveViewToggle(live: live)
                 .padding(10)
@@ -401,6 +518,8 @@ struct LiveViewToggle: View {
 struct LivePane: View {
     @ObservedObject var feed: LiveFeed
     let stopping: Bool
+    /// 撮影のために止めている間は最後のコマを暗くして出す
+    let shooting: Bool
     let onFullScreen: () -> Void
 
     var body: some View {
@@ -410,10 +529,11 @@ struct LivePane: View {
                 Image(uiImage: frame)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .opacity(stopping ? 0.4 : 1)
+                    .opacity(stopping || shooting ? 0.4 : 1)
             } else {
                 ProgressView().tint(.white)
             }
+            if shooting { ShootingBadge() }
             VStack {
                 HStack {
                     LiveBadge(fps: feed.fps)
@@ -434,6 +554,20 @@ struct LivePane: View {
             }
             .padding(10)
         }
+    }
+}
+
+/// 撮影でライブビューを止めている間の表示
+struct ShootingBadge: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small).tint(.white)
+            Text("撮影中").font(.system(size: 13, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.black.opacity(0.5), in: Capsule())
     }
 }
 
@@ -484,9 +618,11 @@ struct LiveFullScreen: View {
                 Image(uiImage: frame)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+                    .opacity(live.suspended ? 0.4 : 1)
             } else {
                 ProgressView().tint(.white)
             }
+            if live.suspended { ShootingBadge() }
 
             // 回転させているぶん、端末の角丸とダイナミックアイランドに食い込みやすい。左右は多めに逃がす
             HStack {

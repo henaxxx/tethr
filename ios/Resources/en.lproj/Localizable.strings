@@ -113,3 +113,5 @@
 "バルブではライブビューを使えません。" = "Live view is not available in bulb.";
 "シャッターボタンが押されたままです。" = "The shutter button is being held down.";
 "ミラーアップ中はライブビューを使えません。" = "Live view is not available during mirror-up.";
+"記録先をカードに戻せなかったため、撮影をやめました。" = "The shot was cancelled because the recording destination could not be switched back to the card.";
+"撮影中" = "Shooting";

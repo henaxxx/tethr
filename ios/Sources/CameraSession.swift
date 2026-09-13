@@ -653,6 +653,11 @@ final class CameraSession: NSObject, ObservableObject {
             DebugLog.write("CheckEvent 失敗（次回また試す）: \(describe(error))")
             return false
         }
+        #if DEBUG
+        // 設定の変化以外（SDRAM への撮影 0xC101/0xC102、ライブビューの状態 0xC10C など）は調べるために残す
+        let others = Self.otherEvents(in: data)
+        if !others.isEmpty { DebugLog.write("CheckEvent: " + others.joined(separator: " ")) }
+        #endif
         let changed = Self.changedProperties(in: data)
         guard !changed.isEmpty else { return false }
 
@@ -681,6 +686,17 @@ final class CameraSession: NSObject, ObservableObject {
         for _ in 0..<count {
             guard let code = r.read(UInt16.self), let param = r.read(UInt32.self) else { break }
             if code == 0x4006 { result.insert(UInt16(truncatingIfNeeded: param)) }
+        }
+        return result
+    }
+
+    private static func otherEvents(in data: Data) -> [String] {
+        var r = PTPReader(data)
+        guard let count = r.read(UInt16.self), count < 256 else { return [] }
+        var result: [String] = []
+        for _ in 0..<count {
+            guard let code = r.read(UInt16.self), let param = r.read(UInt32.self) else { break }
+            if code != 0x4006 { result.append(String(format: "0x%04X(0x%X)", code, param)) }
         }
         return result
     }
@@ -823,10 +839,7 @@ final class CameraSession: NSObject, ObservableObject {
             return
         }
         // 合焦してカメラが落ち着くまで待つ。最大 3 秒で打ち切る。
-        for _ in 0..<30 {
-            if (try? await send(.nikonDeviceReady)) != nil { return }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
+        await waitUntilReady(seconds: 3)
     }
 
     /// シャッターを切る。撮影後のファイルはイベント経由で一覧に加わる。
@@ -835,8 +848,8 @@ final class CameraSession: NSObject, ObservableObject {
         busy = true
         defer { busy = false }
         if live.isActive {
-            // ライブビュー中はコマ取りを止め、記録先をカードに戻してから切る
-            await live.whilePaused { await self.releaseShutter() }
+            // ライブビューをいったん止め、記録先をカードに戻してから普段どおりに切る
+            await live.whileSuspended { await self.releaseShutter() }
         } else {
             await releaseShutter()
         }
@@ -847,14 +860,55 @@ final class CameraSession: NSObject, ObservableObject {
         // レリーズの前に必ず AF を通す。
         // 操作を増やさずに、実機のシャッター全押しと同じ挙動にする。
         await autofocus()
-        do {
-            try await send(.initiateCapture, params: [0, 0])
-            DebugLog.write("リモートシャッター 0x100E: OK")
-        } catch {
-            DebugLog.write("リモートシャッター 0x100E 失敗: \(describe(error))")
-            // 標準命令が通らない機種向けに Nikon 独自命令も試す
-            if (try? await send(.nikonCapture, params: [0xFFFFFFFF])) == nil {
-                lastError = String(localized: "撮影できませんでした: \(describe(error))")
+        var attempt = 0
+        while true {
+            attempt += 1
+            do {
+                try await send(.initiateCapture, params: [0, 0])
+                DebugLog.write("リモートシャッター 0x100E: OK")
+                return
+            } catch CameraError.ptp(0x2019) where attempt < 5 {
+                // まだ AF やミラーが動いている。libgphoto2 と同じく、落ち着くのを待って同じ命令を送り直す。
+                // ここで別の撮影命令に切り替えると、遅れて両方が効いて何度も切れるおそれがある
+                DebugLog.write("リモートシャッター 0x100E: DeviceBusy（待って送り直す）")
+                await waitUntilReady(seconds: 2)
+            } catch CameraError.ptp(0x2019) {
+                DebugLog.write("リモートシャッター 0x100E: DeviceBusy が続いたので諦める")
+                lastError = String(localized: "撮影できませんでした: \(describe(CameraError.ptp(0x2019)))")
+                return
+            } catch {
+                DebugLog.write("リモートシャッター 0x100E 失敗: \(describe(error))")
+                // 標準命令が通らない機種向けに Nikon 独自命令も試す
+                do {
+                    try await send(.nikonCapture, params: [0xFFFFFFFF])
+                    DebugLog.write("リモートシャッター 0x90C0: OK")
+                } catch {
+                    DebugLog.write("リモートシャッター 0x90C0 失敗: \(describe(error))")
+                    lastError = String(localized: "撮影できませんでした: \(describe(error))")
+                }
+                return
+            }
+        }
+    }
+
+    /// Nikon の作法で、カメラが次の命令を受けられるようになるまで待つ（libgphoto2 の nikon_wait_busy）。
+    /// ビジー以外の応答が返ったら、それが成功でも失敗でも待つのをやめる
+    func waitUntilReady(seconds: Double) async {
+        guard PropFormat.vendor == PropFormat.vendorNikon else {
+            try? await Task.sleep(for: .milliseconds(300))
+            return
+        }
+        let deadline = Date().addingTimeInterval(seconds)
+        while isConnected {
+            do {
+                try await send(.nikonDeviceReady)
+                return
+            } catch CameraError.ptp(let code) where code == 0x2019 || code == 0xA200 {
+                // DeviceBusy / Bulb_Release_Busy
+                guard Date() < deadline else { return }
+                try? await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return
             }
         }
     }

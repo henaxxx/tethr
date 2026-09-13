@@ -24,6 +24,8 @@ enum PTP {
         case nikonAfDrive         = 0x90C1
         case nikonCheckEvent      = 0x90C7
         case nikonDeviceReady     = 0x90C8
+        /// Nikon 独自プロパティの一覧。D300 は DeviceInfo に標準の分しか載せない
+        case nikonGetVendorPropCodes = 0x90CA
         /// 制御権。0x9008 ではない（Nikon の 0x9008 は DeleteProfile）。libgphoto2 ptp.h で確認
         case nikonChangeCameraMode = 0x90C2
         case nikonStartLiveView   = 0x9201

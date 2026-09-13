@@ -430,8 +430,20 @@ final class CameraSession: NSObject, ObservableObject {
     private func dumpPropertyValuesOnce() async {
         guard !dumpedProperties, !supportedProperties.isEmpty else { return }
         dumpedProperties = true
+        var all = supportedProperties
+        if let d = try? await send(.nikonGetVendorPropCodes) {
+            // uint32 個数 → uint16 の並び
+            let b = [UInt8](d)
+            if b.count >= 4 {
+                let n = Int(UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24)
+                for k in 0..<n where 4 + 2 * k + 1 < b.count {
+                    all.append(UInt16(b[4 + 2 * k]) | UInt16(b[5 + 2 * k]) << 8)
+                }
+            }
+        }
+        DebugLog.write("プロパティ値: 標準 \(supportedProperties.count) 件 + 独自 \(all.count - supportedProperties.count) 件")
         var line: [String] = []
-        for prop in supportedProperties {
+        for prop in all {
             guard isConnected else { return }
             let text: String
             if let d = try? await send(.getDevicePropValue, params: [UInt32(prop)]) {
@@ -439,6 +451,8 @@ final class CameraSession: NSObject, ObservableObject {
                 if [1, 2, 4].contains(b.count) {
                     let v = b.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) }
                     text = "\(v)"
+                } else if b.count <= 24 {
+                    text = b.map { String(format: "%02X", $0) }.joined()
                 } else {
                     text = "(\(b.count)B)"
                 }

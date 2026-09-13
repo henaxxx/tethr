@@ -256,7 +256,17 @@ extension EnvironmentValues {
     }
 }
 
+/// 上のプレビュー欄。ライブビュー中は映像に置き換える（LiveView.swift）
 struct PreviewArea: View {
+    @EnvironmentObject var session: CameraSession
+
+    var body: some View {
+        PreviewSwitcher(live: session.live)
+    }
+}
+
+/// 選んだカットの表示
+struct ShotPreviewArea: View {
     @EnvironmentObject var session: CameraSession
     @Environment(\.openReview) private var openReview
     @State private var zoom: CGFloat = 1

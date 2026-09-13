@@ -24,6 +24,11 @@ enum PTP {
         case nikonAfDrive         = 0x90C1
         case nikonCheckEvent      = 0x90C7
         case nikonDeviceReady     = 0x90C8
+        /// 制御権。0x9008 ではない（Nikon の 0x9008 は DeleteProfile）。libgphoto2 ptp.h で確認
+        case nikonChangeCameraMode = 0x90C2
+        case nikonStartLiveView   = 0x9201
+        case nikonEndLiveView     = 0x9202
+        case nikonGetLiveViewImg  = 0x9203
     }
 
     // MARK: プロパティコード
@@ -138,6 +143,7 @@ enum PTP {
         case 0x2019: return "DeviceBusy"
         case 0x201D: return "InvalidParameter"
         case 0xA002: return "ピントが合いませんでした"
+        case 0xA003: return "Nikon:ChangeCameraModeFailed"
         case 0xA004: return "Nikon:InvalidStatus"
         case 0xA005: return "Nikon:SetPropertyNotSupported"
         case 0xA00B: return "Nikon:NotLiveView"

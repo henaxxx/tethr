@@ -99,3 +99,17 @@
 "プリセット" = "Preset";
 "自然光オート" = "Natural light auto";
 "白バランス: %@" = "White balance: %@";
+"ライブビュー" = "Live view";
+"停止" = "Stop";
+"停止中" = "Stopping";
+"開始中" = "Starting";
+"読み込み後に使えます" = "Available after loading";
+"ライブビューを開始できませんでした。レリーズモードダイヤルが Lv になっていないか確認してください。" = "Live view could not start. Check that the release mode dial is not set to Lv.";
+"ライブビューを開始できませんでした（%@）。レリーズモードダイヤルが Lv になっていないか確認してください。" = "Live view could not start (%@). Check that the release mode dial is not set to Lv.";
+"カメラの電池が足りないため、ライブビューを開始できません。" = "The camera battery is too low for live view.";
+"カメラの温度が上がっているため、ライブビューを開始できません。しばらく休ませてください。" = "The camera is too warm for live view. Let it cool down for a while.";
+"カードを確認してください（入っていない、書き込み禁止、エラー、未フォーマットのいずれか）。" = "Check the card: it may be missing, locked, faulty or unformatted.";
+"撮影モードを P・A・S・M のいずれかにしてください。" = "Set the shooting mode to P, A, S or M.";
+"バルブではライブビューを使えません。" = "Live view is not available in bulb.";
+"シャッターボタンが押されたままです。" = "The shutter button is being held down.";
+"ミラーアップ中はライブビューを使えません。" = "Live view is not available during mirror-up.";

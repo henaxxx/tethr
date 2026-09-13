@@ -150,6 +150,10 @@ final class CameraSession: NSObject, ObservableObject {
     /// いま衛星で測っているか。設定画面に出す
     @Published private(set) var gpsMode: LocationProvider.Mode = .off
     private let pocket = PocketDetector()
+    /// ライブビュー。映像は別の観測対象に分けてあり、画面全体は描き直さない
+    let live = LiveViewController()
+    /// いまつないでいるカメラの識別子。カメラごとの覚え書きに使う
+    var cameraIdentifier: String? { lastCameraID }
     private var appActive = true
     private var shotsWhilePocketed = 0
     /// ポケットの中で取らずにおいたサムネイル
@@ -183,6 +187,7 @@ final class CameraSession: NSObject, ObservableObject {
         }
         pocketModeEnabled = UserDefaults.standard.object(forKey: "pocketMode") as? Bool ?? true
         pocket.onChange = { [weak self] value in self?.pocketChanged(value) }
+        live.session = self
     }
 
     private func updatePocketWatch() {
@@ -193,6 +198,8 @@ final class CameraSession: NSObject, ObservableObject {
         pocketed = value
         if value {
             shotsWhilePocketed = 0
+            // 誰も見ていないのに映像を取り続けても電池を食うだけ
+            Task { await live.stop(reason: "ポケットに入れた") }
             return
         }
         // 取り出した。止めていたものを戻す
@@ -299,14 +306,19 @@ final class CameraSession: NSObject, ObservableObject {
         location.appDidEnterBackground()
         guard let cam = camera, cam.hasOpenSession else { return }
         closedForBackground = true
-        eventLoop?.cancel()
-        if case .connected(let n) = state { state = .connecting(n) }
-        DebugLog.write("背面へ: セッションを閉じる")
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "close-camera-session") { [weak self] in
             Task { @MainActor in self?.endBackgroundTask() }
         }
-        cam.requestCloseSession(options: nil) { [weak self] _ in
-            Task { @MainActor in self?.endBackgroundTask() }
+        Task {
+            // ライブビュー中なら、閉じる前に必ず止める。止める命令を省くとミラーが上がったまま残り、
+            // 記録先も SDRAM のままになってカードに保存されなくなる
+            if live.isActive { await live.stop(reason: "背面へ") }
+            eventLoop?.cancel()
+            if case .connected(let n) = state { state = .connecting(n) }
+            DebugLog.write("背面へ: セッションを閉じる")
+            cam.requestCloseSession(options: nil) { [weak self] _ in
+                Task { @MainActor in self?.endBackgroundTask() }
+            }
         }
     }
 
@@ -499,6 +511,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// カットの一覧は残す。うっかりケーブルが抜けても、同じカメラなら続きから使えるように。
     private func forgetDevice() {
         UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
+        live.forget()
         camera = nil
         fileIndex = [:]
         connectedAt = nil
@@ -821,6 +834,16 @@ final class CameraSession: NSObject, ObservableObject {
         guard isConnected, !busy else { return }
         busy = true
         defer { busy = false }
+        if live.isActive {
+            // ライブビュー中はコマ取りを止め、記録先をカードに戻してから切る
+            await live.whilePaused { await self.releaseShutter() }
+        } else {
+            await releaseShutter()
+        }
+        await refreshProps()
+    }
+
+    private func releaseShutter() async {
         // レリーズの前に必ず AF を通す。
         // 操作を増やさずに、実機のシャッター全押しと同じ挙動にする。
         await autofocus()
@@ -834,7 +857,6 @@ final class CameraSession: NSObject, ObservableObject {
                 lastError = String(localized: "撮影できませんでした: \(describe(error))")
             }
         }
-        await refreshProps()
     }
 
     private func describe(_ error: Error) -> String {
@@ -1086,6 +1108,11 @@ extension CameraSession: ICCameraDeviceDelegate {
             }
             await self.countObjects()
             await self.readVendor()
+            if PropFormat.vendor == PropFormat.vendorNikon {
+                // ライブビュー中にアプリが落ちたりケーブルが抜けたりすると、記録先が SDRAM のまま残り
+                // 本体で撮ってもカードに保存されなくなる。つないだら確かめて戻す
+                await LiveViewController.restoreIfInterrupted(self)
+            }
             self.scheduleCatalogSettle()
             self.checkEventUsable = true
             self.startEventPolling()

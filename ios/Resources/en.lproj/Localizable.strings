@@ -118,3 +118,6 @@
 "接続" = "Connect";
 "接続解除" = "Disconnect";
 "%@・未接続" = "%@ · Disconnected";
+"カメラの電池" = "Camera battery";
+"満充電" = "Full";
+"%lld〜%lld%%" = "%lld–%lld%%";

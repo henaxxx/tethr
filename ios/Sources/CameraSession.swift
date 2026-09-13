@@ -425,8 +425,8 @@ final class CameraSession: NSObject, ObservableObject {
     private var dumpedProperties = false
 
     /// 調査用。対応しているプロパティの値をすべてログに残す（起動ごとに 1 回）。
-    /// 電池残量は 0x5001 が 20% 刻みでしか返らないので、本体メニューの「電池チェック」の残量と
-    /// 同じ数字を持つプロパティが他にないか探す
+    /// 電池残量は 0x5001 が 20% 刻みでしか返らない（本体メニュー 42% のとき 60）ので、
+    /// 1% 単位の残量を持つプロパティが他にないか探す。載っている 206 件には無かった
     private func dumpPropertyValuesOnce() async {
         guard !dumpedProperties, !supportedProperties.isEmpty else { return }
         dumpedProperties = true
@@ -443,29 +443,48 @@ final class CameraSession: NSObject, ObservableObject {
         }
         DebugLog.write("プロパティ値: 標準 \(supportedProperties.count) 件 + 独自 \(all.count - supportedProperties.count) 件")
         var line: [String] = []
+        func flush() {
+            if !line.isEmpty { DebugLog.write("プロパティ値: " + line.joined(separator: " ")) }
+            line = []
+        }
         for prop in all {
             guard isConnected else { return }
-            let text: String
-            if let d = try? await send(.getDevicePropValue, params: [UInt32(prop)]) {
-                let b = [UInt8](d)
-                if [1, 2, 4].contains(b.count) {
-                    let v = b.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) }
-                    text = "\(v)"
-                } else if b.count <= 24 {
-                    text = b.map { String(format: "%02X", $0) }.joined()
-                } else {
-                    text = "(\(b.count)B)"
-                }
-            } else {
-                text = "×"
-            }
-            line.append(String(format: "%04X=", prop) + text)
-            if line.count == 12 {
-                DebugLog.write("プロパティ値: " + line.joined(separator: " "))
-                line = []
+            line.append(String(format: "%04X=", prop) + (await propertyValueText(prop) ?? "×"))
+            if line.count == 12 { flush() }
+        }
+        flush()
+
+        // 一覧に載っていない番号も読むだけ試す（読み取りのみで設定は変わらない）。
+        // 本体メニューの電池残量（1% 単位）が隠れていないかを見るため。1 回やれば十分なので覚えておく
+        let scanKey = "unlistedPropertyScan.v1"
+        guard !UserDefaults.standard.bool(forKey: scanKey) else { return }
+        let listed = Set(all)
+        let candidates = Array(0x5000...0x50FF) + Array(0xD000...0xD4FF)
+        let started = Date()
+        var found = 0
+        DebugLog.write("未掲載プロパティの走査を開始（\(candidates.count) 件）")
+        for code in candidates.map({ UInt16($0) }) where !listed.contains(code) {
+            guard isConnected else { return }
+            if let text = await propertyValueText(code) {
+                found += 1
+                line.append(String(format: "%04X=", code) + text)
+                if line.count == 12 { flush() }
             }
         }
-        if !line.isEmpty { DebugLog.write("プロパティ値: " + line.joined(separator: " ")) }
+        flush()
+        UserDefaults.standard.set(true, forKey: scanKey)
+        DebugLog.write(String(format: "未掲載プロパティの走査を終了: 応答 %d 件、%.1f 秒", found, Date().timeIntervalSince(started)))
+    }
+
+    private func propertyValueText(_ prop: UInt16) async -> String? {
+        guard let d = try? await send(.getDevicePropValue, params: [UInt32(prop)]) else { return nil }
+        let b = [UInt8](d)
+        if [1, 2, 4].contains(b.count) {
+            return "\(b.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) })"
+        } else if b.count <= 24 {
+            return b.map { String(format: "%02X", $0) }.joined()
+        }
+        return "(\(b.count)B)"
     }
     #endif
 

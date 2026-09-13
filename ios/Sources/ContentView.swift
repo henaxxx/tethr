@@ -134,9 +134,7 @@ struct StatusHeader: View {
                     .help("カメラの時計を \(Int(abs(drift))) 秒ぶん合わせました")
             }
             if let battery = session.props[.batteryLevel] {
-                Text(battery.currentText)
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                BatteryIndicator(level: battery.current)
             }
         }
         .padding(.horizontal, 14)
@@ -172,6 +170,32 @@ struct StatusHeader: View {
         case .connected(let n): return n
         case .unauthorized: return String(localized: "設定でカメラへのアクセスを許可してください")
         case .failed(let e): return e
+        }
+    }
+}
+
+/// カメラの電池。
+///
+/// D300 は残量を 20% 刻みの切り上げでしか返さない（本体メニューで 42% のとき 60）。
+/// 数字で出すと実際より多く見えるので、段階のアイコンにする
+struct BatteryIndicator: View {
+    let level: Int64
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 13))
+            .foregroundStyle(level <= 20 ? Color.red : Color.secondary)
+            .accessibilityLabel(Text("カメラの電池"))
+            .accessibilityValue(Text(level >= 100 ? String(localized: "満充電") : String(localized: "\(max(0, level - 19))〜\(level)%")))
+    }
+
+    private var symbol: String {
+        switch level {
+        case 81...:   return "battery.100percent"
+        case 61...80: return "battery.75percent"
+        case 41...60: return "battery.50percent"
+        case 1...40:  return "battery.25percent"
+        default:      return "battery.0percent"
         }
     }
 }

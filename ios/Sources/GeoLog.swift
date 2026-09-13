@@ -46,11 +46,21 @@ final class GeoLog: ObservableObject {
 
     init() { load() }
 
-    var trackSpan: String? {
+    /// 軌跡の最初の点から最後の点まで。
+    ///
+    /// 以前は差を「記録時間 11時間6分」と出していたが、消去してからの点を全部持っているので、
+    /// アプリを使っていなかった夜の間まで含んでいた（実際に記録していたのは 1 時間ほど）。
+    /// 長さではなく、いつからいつまでかを出す
+    var trackPeriod: String? {
         guard let first = track.first?.time, let last = track.last?.time, track.count > 1 else { return nil }
-        let minutes = Int(last.timeIntervalSince(first) / 60)
-        if minutes < 60 { return String(localized: "\(minutes)分") }
-        return String(localized: "\(minutes / 60)時間\(minutes % 60)分")
+        let calendar = Calendar.current
+        let time = Date.FormatStyle(date: .omitted, time: .shortened)
+        let dayAndTime = Date.FormatStyle().month(.defaultDigits).day().hour().minute()
+        if calendar.isDate(first, inSameDayAs: last) {
+            let range = "\(first.formatted(time))〜\(last.formatted(time))"
+            return calendar.isDateInToday(first) ? range : "\(first.formatted(.dateTime.month(.defaultDigits).day())) \(range)"
+        }
+        return "\(first.formatted(dayAndTime))〜\(last.formatted(dayAndTime))"
     }
 
     // MARK: 記録

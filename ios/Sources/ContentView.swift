@@ -32,6 +32,9 @@ struct ContentView: View {
         } message: {
             Text(session.lastError ?? "")
         }
+        .onChange(of: session.lastError) { _, message in
+            if message != nil { Haptics.error() }
+        }
         .fullScreenCover(isPresented: $reviewing) {
             ReviewView().environmentObject(session)
         }
@@ -206,9 +209,15 @@ struct ConnectionButton: View {
 
     var body: some View {
         if session.userDisconnected, case .idle = session.state {
-            pill(String(localized: "接続"), prominent: true) { session.reconnect() }
+            pill(String(localized: "接続"), prominent: true) {
+                Haptics.toggle()
+                session.reconnect()
+            }
         } else if session.isConnected, !session.preparing {
-            pill(String(localized: "接続解除"), prominent: false) { session.disconnect() }
+            pill(String(localized: "接続解除"), prominent: false) {
+                Haptics.toggle()
+                session.disconnect()
+            }
                 .disabled(session.busy)
         }
     }
@@ -242,7 +251,11 @@ struct SourcePicker: View {
         HStack(spacing: 10) {
             Picker("", selection: Binding(
                 get: { session.browsingCard },
-                set: { session.browsingCard = $0 }
+                set: {
+                    guard $0 != session.browsingCard else { return }
+                    Haptics.select()
+                    session.browsingCard = $0
+                }
             )) {
                 Text("テザー (\(session.liveShots.count))").tag(false)
                 Text(cardLabel).tag(true)
@@ -455,6 +468,7 @@ struct ShotPreviewArea: View {
             let url = await session.importShot(shot)
             downloading = false
             guard let url else { return }
+            Haptics.success()
             loadFull(url)
         }
     }
@@ -517,7 +531,11 @@ struct Filmstrip: View {
                         RoundedRectangle(cornerRadius: 5)
                             .strokeBorder(shot.id == session.selection ? Color.accentColor : .clear, lineWidth: 2)
                     )
-                    .onTapGesture { session.selection = shot.id }
+                    .onTapGesture {
+                        guard session.selection != shot.id else { return }
+                        Haptics.select()
+                        session.selection = shot.id
+                    }
                     .onAppear { session.requestThumbnail(for: shot) }
                 }
             }
@@ -566,6 +584,7 @@ struct WhiteBalanceMenu: View {
 
     private func select(_ value: Int64, from wb: PropDesc) {
         guard value != (pending ?? wb.current) else { return }
+        Haptics.select()
         pending = value
         generation += 1
         let mine = generation
@@ -573,7 +592,7 @@ struct WhiteBalanceMenu: View {
             let accepted = await session.setProp(.whiteBalance, to: value)
             guard mine == generation else { return }
             pending = nil
-            if !accepted { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+            if !accepted { Haptics.warning() }
         }
     }
 }
@@ -616,6 +635,7 @@ struct ControlPanel: View {
                 .help("位置情報")
                 Spacer(minLength: 4)
                 Button {
+                    Haptics.shutter()
                     Task { await session.capture() }
                 } label: {
                     Group {
@@ -694,6 +714,7 @@ struct ModeSelector: View {
 
     private func select(_ value: Int64) {
         guard value != (pending ?? desc.current) else { return }
+        Haptics.select()
         pending = value
         generation += 1
         let mine = generation
@@ -701,7 +722,7 @@ struct ModeSelector: View {
             let accepted = await onSelect(value)
             guard mine == generation else { return }
             pending = nil
-            if !accepted { UINotificationFeedbackGenerator().notificationOccurred(.warning) }
+            if !accepted { Haptics.warning() }
         }
     }
 }

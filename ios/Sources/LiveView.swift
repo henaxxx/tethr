@@ -86,6 +86,7 @@ final class LiveViewController: ObservableObject {
             guard ok else { throw LiveViewFailure.noFrames }
 
             state = .on
+            Haptics.success()
             runLoop()
         } catch LiveViewFailure.stopped {
             await teardown()
@@ -496,7 +497,10 @@ struct LiveViewToggle: View {
         if session.isConnected, PropFormat.vendor == PropFormat.vendorNikon {
             // カードの読み込み中は映像が返らないので押せなくする
             let ready = session.catalogReady
-            Button { live.toggle() } label: {
+            Button {
+                Haptics.toggle()
+                live.toggle()
+            } label: {
                 HStack(spacing: 5) {
                     switch live.state {
                     case .starting, .stopping:
@@ -662,6 +666,7 @@ struct LiveFullScreen: View {
                 }
                 Spacer()
                 Button {
+                    Haptics.shutter()
                     Task { await session.capture() }
                 } label: {
                     Group {

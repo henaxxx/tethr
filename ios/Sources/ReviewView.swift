@@ -143,6 +143,7 @@ struct ReviewView: View {
     private func step(_ delta: Int) {
         let next = index + delta
         guard shots.indices.contains(next) else { return }
+        Haptics.select()
         session.selection = shots[next].id
     }
 
@@ -161,6 +162,7 @@ struct ReviewView: View {
             let url = await session.importShot(shot)
             downloading = false
             guard let url else { return }
+            Haptics.success()
             fullImage = await Preview.load(url)
         }
     }

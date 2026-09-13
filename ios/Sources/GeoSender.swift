@@ -30,7 +30,17 @@ final class GeoSender: ObservableObject {
     private static let magic = Data("TETHR1".utf8)
 
     @Published private(set) var peers: [Peer] = []
-    @Published private(set) var status: Status = .idle
+    @Published private(set) var status: Status = .idle {
+        didSet {
+            // 送った結果だけ手応えで返す。探索の失敗では鳴らさない
+            guard case .sending = oldValue else { return }
+            switch status {
+            case .sent: Haptics.success()
+            case .failed: Haptics.error()
+            default: break
+            }
+        }
+    }
 
     private var browser: NWBrowser?
     private var connection: NWConnection?

@@ -47,8 +47,8 @@ struct GeoPanel: View {
                     LabeledContent("軌跡") {
                         Text("\(session.geoLog.track.count) 点").monospacedDigit()
                     }
-                    if let span = session.geoLog.trackSpan {
-                        LabeledContent("記録時間", value: span)
+                    if let period = session.geoLog.trackPeriod {
+                        LabeledContent("記録期間", value: period)
                     }
                 }
 

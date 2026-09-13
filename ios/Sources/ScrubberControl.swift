@@ -19,6 +19,8 @@ struct ScrubberControl: View {
 
     @State private var dragOffset: CGFloat = 0
     @State private var dragging = false
+    /// 端に当たっている。当たった瞬間に 1 度だけ手応えを返す
+    @State private var atEdge = false
     /// 指を離して選んだ段。カメラが応えるまでここに留める
     @State private var pendingIndex: Int?
     /// 返事を待つ間に次の操作が来たら、古い返事で表示を戻さないための番号
@@ -80,7 +82,9 @@ struct ScrubberControl: View {
         .opacity(enabled ? 1 : 0.45)
         .disabled(!enabled)
         // 段をまたぐたびに軽く手応えを返す。カメラ側の変化（A モードで自動に変わる等）では鳴らさない
-        .sensoryFeedback(.selection, trigger: displayIndex) { _, _ in dragging }
+        .onChange(of: displayIndex) { _, _ in
+            if dragging { Haptics.select() }
+        }
     }
 
     private func strip(width: CGFloat) -> some View {
@@ -122,14 +126,21 @@ struct ScrubberControl: View {
         DragGesture(minimumDistance: 1)
             .onChanged { value in
                 guard !options.isEmpty else { return }
+                if !dragging { Haptics.prepareForDrag() }
                 dragging = true
                 // 端を越えて滑らないよう、移動量そのものを制限する
                 let maxRight = CGFloat(baseIndex) * itemWidth
                 let maxLeft = -CGFloat(options.count - 1 - baseIndex) * itemWidth
-                dragOffset = min(max(value.translation.width, maxLeft), maxRight)
+                let raw = value.translation.width
+                dragOffset = min(max(raw, maxLeft), maxRight)
+                // 端の段を越えて引っ張った瞬間。端の段に来たときの selection とは別に、行き止まりを伝える
+                let pastEdge = raw > maxRight + itemWidth / 2 || raw < maxLeft - itemWidth / 2
+                if pastEdge && !atEdge { Haptics.edge() }
+                atEdge = pastEdge
             }
             .onEnded { _ in
                 dragging = false
+                atEdge = false
                 let target = displayIndex
                 let current = selectedIndex
                 // 指を離した位置から、選んだ段の中央へなめらかに寄せる。返事を待たずにそこへ留める
@@ -148,9 +159,7 @@ struct ScrubberControl: View {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
                         pendingIndex = nil
                     }
-                    if !accepted {
-                        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-                    }
+                    if !accepted { Haptics.warning() }
                 }
             }
     }

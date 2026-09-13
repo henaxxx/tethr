@@ -309,10 +309,14 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
+    /// 手で戻した接続が開いたら、操作できるようになったと手応えで知らせる
+    private var announceNextOpen = false
+
     /// 手で解除した接続を戻す
     func reconnect() {
         guard userDisconnected, let cam = camera, !cam.hasOpenSession else { return }
         userDisconnected = false
+        announceNextOpen = true
         reopen(cam, reason: "接続")
     }
 
@@ -586,6 +590,7 @@ final class CameraSession: NSObject, ObservableObject {
                 added.append(shot)
             }
             liveShots.insert(contentsOf: added.reversed(), at: 0)
+            Haptics.shotArrived()
             selection = liveShots.first?.id
             for shot in added { requestThumbnail(for: shot) }
             if pocketed {
@@ -1262,6 +1267,7 @@ extension CameraSession: ICDeviceBrowserDelegate {
         Task { @MainActor in
             guard device === self.camera else { return }
             self.forgetDevice()
+            Haptics.warning()
             self.state = .failed(String(localized: "カメラが取り外されました"))
         }
     }
@@ -1281,6 +1287,9 @@ extension CameraSession: ICCameraDeviceDelegate {
             }
             self.state = .connected(device.name ?? "カメラ")
             DebugLog.write("セッションを開いた")
+            // つないで初めて開いたときと、手で接続し直したときだけ知らせる。背面から戻るたびには鳴らさない
+            let announce = self.connectedAt == nil || self.announceNextOpen
+            self.announceNextOpen = false
             if self.connectedAt == nil {
                 // このカメラで初めて開いた。ここから準備完了まで命令が通らない
                 self.connectedAt = opened
@@ -1290,6 +1299,7 @@ extension CameraSession: ICCameraDeviceDelegate {
             // 時計は準備完了まで読めない。読み終えたら、溜めていたファイルを判定して流す
             await self.syncClock()
             self.preparing = false
+            if announce, self.isConnected { Haptics.success() }
             if !self.classifyReady {
                 self.classifyReady = true
                 // 準備の長さは 7 秒台と 38 秒台に分かれ、長いのは前の接続から 10 分以上空いた後に見える。

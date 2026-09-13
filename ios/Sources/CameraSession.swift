@@ -295,6 +295,12 @@ final class CameraSession: NSObject, ObservableObject {
         PropFormat.vendor == PropFormat.vendorNikon && capabilities?.isNikon1 != true
     }
 
+    /// DeviceInfo に露出まわりの設定が 1 つも載っていない（J1 は電池と時計だけ）
+    var cannotAdjustSettings: Bool {
+        guard isConnected, let caps = capabilities else { return false }
+        return !(PTP.Prop.allCases.contains { $0 != .batteryLevel && caps.properties.contains($0.rawValue) })
+    }
+
     /// 露出計（Nikon 0xD1B1）を読めるか
     var lightMeterAvailable: Bool {
         guard let caps = capabilities, caps.isNikon1 else { return true }
@@ -418,8 +424,17 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// メーカーを読む。白バランス等の独自の値の読み方がメーカーで違うため
     private func readVendor() async {
-        guard let data = try? await send(.getDeviceInfo),
-              let info = Self.parseDeviceInfo(data) else { return }
+        let data: Data
+        do {
+            data = try await send(.getDeviceInfo)
+        } catch {
+            DebugLog.write("DeviceInfo を読めない: \(describe(error))")
+            return
+        }
+        guard let info = Self.parseDeviceInfo(data) else {
+            DebugLog.write("DeviceInfo を解釈できない（\(data.count) バイト）")
+            return
+        }
         supportedProperties = info.properties
         capabilities = CameraCapabilities(info)
         #if DEBUG
@@ -910,7 +925,7 @@ final class CameraSession: NSObject, ObservableObject {
     @discardableResult
     func send(_ op: PTP.Op, params: [UInt32] = [], outData: Data? = nil) async throws -> Data {
         guard let cam = camera else { throw CameraError.notConnected }
-        if let caps = capabilities, let refusal = caps.refusal(op, params: params) {
+        if let refusal = capabilities?.refusal(op, params: params) ?? CameraCapabilities.refusalBeforeDeviceInfo(op, params: params) {
             // 送らずに断る。Nikon 1 は名乗っていない命令や一部の独自命令で通信ごと固まる
             let key = "\(op.rawValue)-\(params.first ?? 0)"
             if !refusalsLogged.contains(key) {
@@ -1372,7 +1387,12 @@ extension CameraSession: ICCameraDeviceDelegate {
                 self.ingest(held)
             }
             await self.countObjects()
-            if self.capabilities == nil { await self.readVendor() }
+            // 準備完了の直後は DeviceInfo が失敗することがある（J1 の 1 回目の接続で起きた）。
+            // 読めないまま進むと独自命令を止められないので、読めるまで何度か試す
+            for attempt in 1...4 where self.capabilities == nil && self.isConnected {
+                if attempt > 1 { try? await Task.sleep(for: .milliseconds(500)) }
+                await self.readVendor()
+            }
             if self.supportsLiveView {
                 // ライブビュー中にアプリが落ちたりケーブルが抜けたりすると、記録先が SDRAM のまま残り
                 // 本体で撮ってもカードに保存されなくなる。つないだら確かめて戻す
@@ -1531,6 +1551,19 @@ struct CameraCapabilities {
         let nikon = info.manufacturer.localizedCaseInsensitiveContains("Nikon")
         let first = info.model.first
         isNikon1 = nikon && (first == "J" || first == "V" || (first == "S" && info.model.count < 3))
+    }
+
+    /// DeviceInfo を読めるまでは機種が分からない。標準の命令と標準のプロパティだけを通す。
+    /// J1 の 1 回目の接続で DeviceInfo が失敗し、そのまま CheckEvent を送って 0.2 秒後にカメラが外れた
+    static func refusalBeforeDeviceInfo(_ op: PTP.Op, params: [UInt32]) -> (reason: String, code: UInt16)? {
+        if op.rawValue >= 0x9000 {
+            return ("DeviceInfo を読む前の独自命令", 0x2005)
+        }
+        if [PTP.Op.getDevicePropDesc, .getDevicePropValue, .setDevicePropValue].contains(op),
+           let prop = params.first, prop >= 0xD000 {
+            return ("DeviceInfo を読む前の独自プロパティ", 0x200A)
+        }
+        return nil
     }
 
     /// 送ってはいけなければ、その理由と代わりに返す応答コード

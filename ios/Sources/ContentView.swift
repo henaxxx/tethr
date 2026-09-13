@@ -652,6 +652,13 @@ struct ControlPanel: View {
                 .disabled(!session.isConnected || session.busy)
             }
 
+            if session.cannotAdjustSettings {
+                Label("この機種は USB から設定を変えられません。露出や ISO は本体で設定してください。", systemImage: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             ForEach(session.adjustable, id: \.self) { prop in
                 if let desc = session.props[prop], !desc.choices.isEmpty {
                     ScrubberControl(

@@ -122,3 +122,4 @@
 "満充電" = "Full";
 "%lld〜%lld%%" = "%lld–%lld%%";
 "記録期間" = "Period";
+"この機種は USB から設定を変えられません。露出や ISO は本体で設定してください。" = "This camera does not allow settings to be changed over USB. Set exposure and ISO on the camera.";

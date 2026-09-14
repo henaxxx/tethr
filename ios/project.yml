@@ -3,11 +3,16 @@ options:
   bundleIdPrefix: app.tethr
   deploymentTarget:
     iOS: "17.0"
+packages:
+  TethrKit:
+    path: ../TethrKit
 targets:
   TethrTouch:
     type: application
     platform: iOS
     sources: [Sources, Resources]
+    dependencies:
+      - package: TethrKit
     info:
       path: Info.plist
       properties:

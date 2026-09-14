@@ -4,19 +4,19 @@ import Foundation
 ///
 /// カメラは「現在値」だけでなく「取り得る値の一覧」も返してくる。
 /// スクラバーの選択肢はここから作る。決め打ちの表を持つ必要はない。
-struct PropDesc {
-    let code: PTP.Prop
-    let dataType: PTP.DataType
-    let writable: Bool
-    let current: Int64
+public struct PropDesc {
+    public let code: PTP.Prop
+    public let dataType: PTP.DataType
+    public let writable: Bool
+    public let current: Int64
     /// 選択肢。列挙形式のときだけ埋まる。
-    let choices: [Int64]
+    public let choices: [Int64]
 
     /// データセットの構造は PTP 仕様で決まっている。
     ///   uint16 プロパティコード / uint16 データ型 / uint8 読み書き可否
     ///   既定値 / 現在値 / uint8 フォーム種別
     ///   フォーム 1 = 範囲（最小・最大・刻み） / 2 = 列挙（個数 + 値の並び）
-    init?(_ data: Data) {
+    public init?(_ data: Data) {
         var r = PTPReader(data)
         guard let rawCode = r.read(UInt16.self),
               let code = PTP.Prop(rawValue: rawCode),
@@ -63,26 +63,24 @@ struct PropDesc {
         }
     }
 
-    #if DEBUG
-    /// 画面の確認用に、カメラ無しで組み立てる
-    init(code: PTP.Prop, dataType: PTP.DataType, writable: Bool, current: Int64, choices: [Int64]) {
+    /// カメラ無しで組み立てる（画面の確認用のデモなど）
+    public init(code: PTP.Prop, dataType: PTP.DataType, writable: Bool, current: Int64, choices: [Int64]) {
         self.code = code
         self.dataType = dataType
         self.writable = writable
         self.current = current
         self.choices = choices
     }
-    #endif
 
-    var currentText: String { PropFormat.text(code, current) }
-    var choiceTexts: [String] { choices.map { PropFormat.text(code, $0) } }
+    public var currentText: String { PropFormat.text(code, current) }
+    public var choiceTexts: [String] { choices.map { PropFormat.text(code, $0) } }
 }
 
 /// PTP の生の数値を人間が読む形にする。
 /// 単位は仕様で決まっていて、機種によらず共通。
-enum PropFormat {
+public enum PropFormat {
 
-    static func text(_ prop: PTP.Prop, _ value: Int64) -> String {
+    public static func text(_ prop: PTP.Prop, _ value: Int64) -> String {
         switch prop {
         case .fNumber:
             // 絞りは 100 倍の整数。560 → f/5.6
@@ -173,9 +171,9 @@ enum PropFormat {
     }
 
     /// つないでいるカメラのメーカー（DeviceInfo の VendorExtensionID）。独自の値の読み方を決める
-    static var vendor: UInt32 = 0
-    static let vendorNikon: UInt32 = 0x0A
-    static let vendorSony: UInt32 = 0x11
+    public static var vendor: UInt32 = 0
+    public static let vendorNikon: UInt32 = 0x0A
+    public static let vendorSony: UInt32 = 0x11
 
     private static func vendorWhiteBalanceName(_ value: Int64) -> String? {
         switch (vendor, value) {
@@ -190,7 +188,7 @@ enum PropFormat {
     }
 
     /// 白バランスのアイコン。ボタンにはこれだけを出す
-    static func whiteBalanceSymbol(_ value: Int64) -> String {
+    public static func whiteBalanceSymbol(_ value: Int64) -> String {
         switch value {
         case 1: return "slider.horizontal.3"
         case 2: return "a.circle"

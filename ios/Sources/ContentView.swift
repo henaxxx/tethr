@@ -1,5 +1,6 @@
 import SwiftUI
 import ImageIO
+import TethrKit
 import UniformTypeIdentifiers
 
 /// 撮影の画面。上から、カメラの名前 → 写真 → 写真の情報 → コマの一覧 → 露出 → シャッター。

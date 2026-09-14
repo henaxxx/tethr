@@ -5,6 +5,11 @@ struct TethrTouchApp: App {
     @StateObject private var session = CameraSession()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        // 背面でも取り込みを続けるハンドラは、起動の途中で登録しておく決まり
+        BatchImporter.registerBackgroundTask()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

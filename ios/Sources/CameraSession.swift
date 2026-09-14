@@ -140,6 +140,14 @@ final class CameraSession: NSObject, ObservableObject {
     @Published private(set) var backgroundKeepUntil: Date?
     /// ダイナミックアイランドとロック画面の表示
     private let activity = LiveActivityController()
+    /// 選んだカットをまとめて取り込む
+    let batch = BatchImporter()
+    /// 取り込んだカットの控え（Mac 版と共通の形式）
+    private let ledger = ImportLedger(
+        url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("imported.json"),
+        log: { DebugLog.write($0) }
+    )
     private var activityObservation: AnyCancellable?
     /// 接続を始めた時刻（準備中の経過時間の起点）
     private var activitySince: Date?
@@ -219,9 +227,24 @@ final class CameraSession: NSObject, ObservableObject {
         pocket.onChange = { [weak self] value in self?.pocketChanged(value) }
         live.session = self
         // 画面に出している状態が変わったら、ダイナミックアイランドにも反映する（細かい変化はまとめる）
-        activityObservation = objectWillChange
+        batch.session = self
+        ImportFiles.cleanUp()
+        activityObservation = objectWillChange.merge(with: batch.objectWillChange)
             .throttle(for: .milliseconds(800), scheduler: RunLoop.main, latest: true)
             .sink { [weak self] _ in self?.refreshActivity() }
+    }
+
+    /// 前面にいるか
+    var isAppActive: Bool { appActive }
+
+    /// テザーとカードのどちらかにある、その名前のカット
+    func shot(named name: String) -> Shot? {
+        liveShots.first { $0.name == name } ?? cardShots.first { $0.name == name }
+    }
+
+    /// いま取り込めるか。接続を休ませている間やつなぎ直しの途中、一覧にまだ届いていないカットは取り込めない
+    func canImport(_ name: String) -> Bool {
+        isConnected && camera?.hasOpenSession == true && fileIndex[name] != nil
     }
 
     private func updatePocketWatch() {
@@ -230,6 +253,8 @@ final class CameraSession: NSObject, ObservableObject {
 
     private func pocketChanged(_ value: Bool) {
         pocketed = value
+        // 取り出すと自動ロックが戻るが、まとめて取り込んでいる間は画面を消さない
+        if batch.isRunning { UIApplication.shared.isIdleTimerDisabled = true }
         if value {
             shotsWhilePocketed = 0
             // 誰も見ていないのに映像を取り続けても電池を食うだけ
@@ -390,8 +415,9 @@ final class CameraSession: NSObject, ObservableObject {
         appActive = false
         updatePocketWatch()
         location.appDidEnterBackground()
-        // 背面に回ったあとは予告なく終了させられることがある。控えた位置をここで書き出しておく
+        // 背面に回ったあとは予告なく終了させられることがある。控えた位置と取り込みの控えをここで書き出しておく
         geoLog.save()
+        ledger.flush()
         guard let cam = camera, cam.hasOpenSession else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "camera-session") { [weak self] in
             Task { @MainActor in self?.backgroundTimeExpired() }
@@ -437,6 +463,10 @@ final class CameraSession: NSObject, ObservableObject {
                 var deadline = entered.addingTimeInterval(28)
                 let remaining = UIApplication.shared.backgroundTimeRemaining
                 if remaining < 1e6 { deadline = min(deadline, now.addingTimeInterval(remaining - 8)) }
+                // iOS 26 で背面でも取り込みを続ける許可が下りていれば、取り込みが進んでいる間は保つ。
+                // この許可では backgroundTimeRemaining は 30 秒のまま減っていく（実機）ので、その期限では切らない。
+                // 30 秒を超えても ImageCaptureCore が読み出しを続けるかは、開発版のログで確かめる
+                if let keep = self.batch.keepSessionUntil { deadline = max(deadline, keep) }
                 // 毎秒わずかにずれるので、目に見えるほど変わったときだけ表示を書き換える
                 if abs((self.backgroundKeepUntil ?? .distantPast).timeIntervalSince(deadline)) > 2 {
                     self.backgroundKeepUntil = deadline
@@ -487,7 +517,7 @@ final class CameraSession: NSObject, ObservableObject {
     private func backgroundTimeExpired() {
         let unlimited = UIApplication.shared.backgroundTimeRemaining > 1e6
         DebugLog.write("背面: iOS の猶予が切れた（接続は\(camera?.hasOpenSession == true ? "開いたまま" : "閉じている")、アプリは\(unlimited ? "動き続ける" : "止められる")）")
-        if !unlimited, let cam = camera, cam.hasOpenSession {
+        if !unlimited, batch.keepSessionUntil == nil, let cam = camera, cam.hasOpenSession {
             closeForBackground(cam)
         }
         endBackgroundTask()
@@ -575,6 +605,11 @@ final class CameraSession: NSObject, ObservableObject {
         content.lastShot = liveShots.first?.name
         content.battery = props[.batteryLevel].map { Int($0.current) }
         content.keepUntil = backgroundKeepUntil
+        if let importing = batch.progress, phase == .connected || phase == .loading {
+            content.phase = .importing
+            content.loaded = importing.done
+            content.expected = importing.total
+        }
         #if DEBUG
         // 起動引数 -demoActivity=loading などで、表示だけを確かめる
         if demo, let forced = Self.demoArgument("demoActivity"),
@@ -690,7 +725,8 @@ final class CameraSession: NSObject, ObservableObject {
             fileIndex[name] = file
             guard !listed.contains(name) else { continue }
             listed.insert(name)
-            let shot = Shot(name: name, size: Int(file.fileSize), captured: file.creationDate)
+            var shot = Shot(name: name, size: Int(file.fileSize), captured: file.creationDate)
+            shot.imported = ledger.contains(serial: cameraKey, name: name, size: Int64(file.fileSize), captured: file.creationDate)
             if isShotAfterConnecting(file) { live.append((shot, file)) } else { card.append(shot) }
         }
 
@@ -768,8 +804,8 @@ final class CameraSession: NSObject, ObservableObject {
         // 完了の判定が早すぎた場合に、まだ届いていないだけのカットを消さないよう、
         // 届いた数が接続時のオブジェクト数にほぼ達しているときに限る（フォルダの分は見逃す）
         if let expected = expectedObjects, deliveredNames.count + 10 >= expected {
-            liveShots.removeAll { fileIndex[$0.name] == nil && $0.localURL == nil }
-            cardShots.removeAll { fileIndex[$0.name] == nil && $0.localURL == nil }
+            liveShots.removeAll { fileIndex[$0.name] == nil && !$0.imported }
+            cardShots.removeAll { fileIndex[$0.name] == nil && !$0.imported }
         }
         cardShots.sort { $0.name > $1.name }
         catalogReady = true
@@ -1125,9 +1161,23 @@ final class CameraSession: NSObject, ObservableObject {
         return error.localizedDescription
     }
 
-    func markDownloaded(_ shot: Shot, url: URL) {
-        if let i = liveShots.firstIndex(where: { $0.name == shot.name }) { liveShots[i].localURL = url }
-        if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].localURL = url }
+    /// 写真アプリへ入った。控えに残し、一覧の印を付ける
+    func markImported(_ shot: Shot, preview: URL?) {
+        ledger.record(serial: cameraKey, name: shot.name, size: Int64(shot.size), captured: shot.captured)
+        if let i = liveShots.firstIndex(where: { $0.name == shot.name }) {
+            liveShots[i].imported = true
+            liveShots[i].previewURL = preview
+        }
+        if let i = cardShots.firstIndex(where: { $0.name == shot.name }) {
+            cardShots[i].imported = true
+            cardShots[i].previewURL = preview
+        }
+    }
+
+    /// 取り込みの控えに使うカメラの識別。DeviceInfo のシリアル番号（Mac 版と同じ）、読めなければ ImageCaptureCore の UUID
+    private var cameraKey: String {
+        if let serial = ptp?.info?.serialNumber, !serial.isEmpty { return serial }
+        return lastCameraID ?? "?"
     }
 
     // MARK: サムネイルと取り込み
@@ -1252,13 +1302,13 @@ final class CameraSession: NSObject, ObservableObject {
                 let request = PHAssetCreationRequest.forAsset()
                 let options = PHAssetResourceCreationOptions()
                 options.originalFilename = url.lastPathComponent
+                // 複製せずに写真アプリへ移す。11MB のコピーが減り、端末に NEF が残らない
+                options.shouldMoveFile = true
                 request.addResource(with: .photo, fileURL: url, options: options)
                 // RAW 本体には手を触れず、写真アプリの資産情報として位置を持たせる
                 if let coordinate { request.location = coordinate }
                 if let captured = shot.captured { request.creationDate = captured }
             }
-            if let i = liveShots.firstIndex(where: { $0.name == shot.name }) { liveShots[i].savedToPhotos = true }
-            if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].savedToPhotos = true }
             return true
         } catch {
             lastError = String(localized: "写真アプリに保存できませんでした: \(error.localizedDescription)")
@@ -1266,10 +1316,12 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
-    /// カメラから端末内へ取り込み、そのまま写真アプリへ渡す。
-    /// 取り込みの入口。カメラから読み出し、写真アプリへ保存するまでを行う。
+    /// カメラから読み出し、写真アプリへ移す。写真アプリに入ったかを返す。
+    ///
+    /// 読み出した NEF は写真アプリへ移すので、端末には残らない（以前は取り込むたびに 11MB ずつ溜まっていた）。
+    /// 大きな写真の表示に使う JPEG だけを、先に取り出してキャッシュに置く
     @discardableResult
-    func importShot(_ shot: Shot) async -> URL? {
+    func importShot(_ shot: Shot, reportErrors: Bool = true) async -> Bool {
         #if DEBUG
         if demo { return await demoImport(shot) }
         #endif
@@ -1280,18 +1332,25 @@ final class CameraSession: NSObject, ObservableObject {
             if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].location = shot.location }
         }
         DebugLog.write("取り込み: \(shot.name) 位置 \(shot.location.map { String(format: "%.5f,%.5f ±%.0fm", $0.coordinate.latitude, $0.coordinate.longitude, $0.horizontalAccuracy) } ?? "なし")")
-        guard importProgress[shot.name] == nil else { return nil }
+        guard importProgress[shot.name] == nil else { return false }
         importProgress[shot.name] = 0
-        guard let url = await download(shot) else {
+        guard let url = await download(shot, reportErrors: reportErrors) else {
             importProgress[shot.name] = nil
-            return nil
+            return false
         }
         // 読み出しで 9 割、写真アプリへの保存で残りを満たす
         importProgress[shot.name] = 0.95
-        markDownloaded(shot, url: url)
-        _ = await saveToPhotos(url, shot: shot)
+        let preview = await ImportFiles.cachePreview(from: url, name: shot.name)
+        let saved = await saveToPhotos(url, shot: shot)
+        // 写真アプリへ移せなかったときも、端末に NEF を溜めない（取り込み直せばよい）
+        try? FileManager.default.removeItem(at: url)
+        if saved {
+            markImported(shot, preview: preview)
+        } else if let preview {
+            try? FileManager.default.removeItem(at: preview)
+        }
         await finishImportProgress(shot.name)
-        return url
+        return saved
     }
 
     /// 満ちきったところを一瞬見せてから、保存済みの表示に切り替える
@@ -1309,11 +1368,12 @@ final class CameraSession: NSObject, ObservableObject {
         importProgress[name] = value
     }
 
-    private func download(_ shot: Shot) async -> URL? {
+    private func download(_ shot: Shot, reportErrors: Bool = true) async -> URL? {
         guard let file = fileIndex[shot.name] else { return nil }
         transferCount += 1
         defer { transferCount -= 1 }
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = ImportFiles.downloads
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let name = shot.name
         let watch = ProgressWatch()
         let url: URL? = await withCheckedContinuation { cont in
@@ -1323,7 +1383,11 @@ final class CameraSession: NSObject, ObservableObject {
             ]) { filename, error in
                 watch.stop()
                 if let error {
-                    Task { @MainActor in self.lastError = String(localized: "取り込みに失敗しました: \(error.localizedDescription)") }
+                    DebugLog.write("取り込みの読み出しに失敗: \(name) \(error.localizedDescription)")
+                    // まとめて取り込むときは、背面で止められただけのことが多い。戻ってからやり直すので知らせない
+                    if reportErrors {
+                        Task { @MainActor in self.lastError = String(localized: "取り込みに失敗しました: \(error.localizedDescription)") }
+                    }
                     cont.resume(returning: nil)
                     return
                 }
@@ -1378,8 +1442,7 @@ extension CameraSession {
             demoPendingThumbnails[cardShots[i].name] = cardShots[i].thumbnail
             cardShots[i].thumbnail = nil
         }
-        cardShots[1].localURL = FileManager.default.temporaryDirectory.appendingPathComponent(cardShots[1].name)
-        cardShots[1].savedToPhotos = true
+        cardShots[1].imported = true
         // -demoCard でカード側、-demoShot=1 で何枚目を選ぶか、-demoLive でライブビュー
         browsingCard = ProcessInfo.processInfo.arguments.contains("-demoCard")
         let index = Self.demoArgument("demoShot").flatMap { Int($0) } ?? 0
@@ -1423,8 +1486,8 @@ extension CameraSession {
         selection = shot.id
     }
 
-    private func demoImport(_ shot: Shot) async -> URL? {
-        guard importProgress[shot.name] == nil else { return nil }
+    private func demoImport(_ shot: Shot) async -> Bool {
+        guard importProgress[shot.name] == nil else { return false }
         importProgress[shot.name] = 0
         // 最初の数字が届くまでの間（光の帯）も見えるようにする
         try? await Task.sleep(for: .milliseconds(500))
@@ -1433,13 +1496,11 @@ extension CameraSession {
             reportDownloadProgress(shot.name, Double(step) / 20)
         }
         importProgress[shot.name] = 0.95
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(shot.name)
-        markDownloaded(shot, url: url)
-        if let i = liveShots.firstIndex(where: { $0.name == shot.name }) { liveShots[i].savedToPhotos = true }
-        if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].savedToPhotos = true }
+        if let i = liveShots.firstIndex(where: { $0.name == shot.name }) { liveShots[i].imported = true }
+        if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].imported = true }
         try? await Task.sleep(for: .milliseconds(150))
         await finishImportProgress(shot.name)
-        return url
+        return true
     }
 
     /// 撮影モードに応じて、カメラ任せの値と露出計を D300 らしく動かす（規則は Mac と共通の DemoCamera）

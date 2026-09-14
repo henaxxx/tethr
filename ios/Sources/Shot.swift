@@ -13,12 +13,12 @@ struct Shot: Identifiable, Equatable {
     var thumbnail: UIImage?
     /// プレビュー用の大きい絵。選択されたときだけ取りに行く。
     var preview: UIImage?
-    /// 写真アプリへ保存済みか
-    var savedToPhotos = false
+    /// 写真アプリへ取り込み済みか（取り込みの控えにあるか、この起動中に取り込んだ）
+    var imported = false
     /// このカットが届いた瞬間の端末の位置。取り込み時に付与する。
     var location: CLLocation?
-    /// 端末内に取り込み済みなら、その場所
-    var localURL: URL?
+    /// 取り込んだときに NEF から取り出した、表示用の JPEG（キャッシュ。起動のたびに片付ける）
+    var previewURL: URL?
     /// 撮影時のカメラの向き（TIFF の Orientation）。プレビューを読んだときに分かる
     var orientation: Int?
 
@@ -34,8 +34,8 @@ struct Shot: Identifiable, Equatable {
             && a.thumbnail === b.thumbnail
             && a.preview === b.preview
             && a.location === b.location
-            && a.localURL == b.localURL
-            && a.savedToPhotos == b.savedToPhotos
+            && a.previewURL == b.previewURL
+            && a.imported == b.imported
             && a.orientation == b.orientation
     }
 }

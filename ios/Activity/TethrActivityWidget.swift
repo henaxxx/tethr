@@ -61,13 +61,13 @@ private struct CompactLeading: View {
 
     var body: some View {
         switch state.phase {
-        case .loading:
+        case .loading, .importing:
             if let fraction = state.fraction {
                 ProgressView(value: fraction)
                     .progressViewStyle(.circular)
                     .tint(amber)
             } else {
-                Image(systemName: "sdcard").foregroundStyle(amber)
+                Image(systemName: state.phase == .importing ? "arrow.down.circle" : "sdcard").foregroundStyle(amber)
             }
         case .paused:
             Image(systemName: "pause.circle.fill").foregroundStyle(.secondary)
@@ -87,7 +87,7 @@ private struct CompactTrailing: View {
                 // 止まって見えないよう、経過時間を進める（アプリが止まっていてもシステムが数える）
                 Text(timerInterval: state.since...Date.distantFuture, countsDown: false)
                     .frame(maxWidth: 44)
-            case .loading:
+            case .loading, .importing:
                 if let expected = state.expected {
                     Text("\(state.loaded)/\(expected)")
                 } else {
@@ -121,13 +121,13 @@ private struct StatusDetail: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
                         .frame(maxWidth: 60, alignment: .trailing)
-                } else if state.phase == .loading, let expected = state.expected {
+                } else if state.phase == .loading || state.phase == .importing, let expected = state.expected {
                     Text("\(state.loaded) / \(expected)")
                         .font(.system(size: 13).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
-            if state.phase == .loading, let fraction = state.fraction {
+            if state.phase == .loading || state.phase == .importing, let fraction = state.fraction {
                 ProgressView(value: fraction).tint(amber)
             }
             detail
@@ -144,6 +144,7 @@ private struct StatusDetail: View {
         case .loading: return "カードを読み込み中"
         case .connected: return "接続中"
         case .paused: return "接続を休ませています"
+        case .importing: return "写真を取り込み中"
         }
     }
 
@@ -161,6 +162,8 @@ private struct StatusDetail: View {
             }
         } else if state.phase == .loading {
             Text("ホーム画面にいる間も、しばらく読み込みを続けます")
+        } else if state.phase == .importing {
+            Text("アプリに戻ると、残りを続けて取り込みます")
         } else if let lastShot = state.lastShot {
             Text("撮ったカット \(state.shots) 枚・最新 \(lastShot)")
         } else if state.phase == .preparing {

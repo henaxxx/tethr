@@ -17,6 +17,8 @@ struct TethrActivityAttributes: ActivityAttributes {
             case connected
             /// 背面に回ったので接続を休ませた。アプリに戻ると続きから
             case paused
+            /// 選んだカットを写真アプリへ取り込んでいる（loaded / expected が枚数）
+            case importing
         }
 
         var phase: Phase

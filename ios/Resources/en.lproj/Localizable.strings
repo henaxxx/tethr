@@ -131,3 +131,20 @@
 "%lld 秒で停止" = "Stops in %lld s";
 "全画面" = "Full screen";
 "閉じる" = "Close";
+
+/* まとめて取り込み */
+"すべて選択" = "Select All";
+"選択解除" = "Deselect All";
+"%lld 枚を選択" = "%lld selected";
+"未取り込みをすべて選ぶ" = "Select everything not imported";
+"取り込む（%lld）" = "Import (%lld)";
+"止める" = "Stop";
+"取り込み中 %lld / %lld" = "Importing %lld of %lld";
+"戻ると続きから取り込みます" = "Importing resumes when you return";
+"画面は消えないようにしています" = "The screen stays on while importing";
+"%lld 枚を写真に保存しました" = "Saved %lld to Photos";
+"（%lld 枚は取り込めませんでした）" = " (%lld could not be imported)";
+"（残り %lld 枚は止めました）" = " (stopped with %lld left)";
+"写真を取り込み中" = "Importing to Photos";
+"0 / %lld 枚" = "0 of %lld";
+"%lld / %lld 枚" = "%lld of %lld";

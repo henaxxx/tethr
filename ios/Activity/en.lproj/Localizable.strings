@@ -12,3 +12,5 @@
 "電源を入れた直後は、1 分ほどかかることがあります" = "Right after power-on this can take about a minute";
 "シャッターを切ると、ここに届いた枚数が出ます" = "Shots you take are counted here";
 "ホーム画面にいる間も、しばらく読み込みを続けます" = "Keeps reading for a little while after you leave Tethr";
+"写真を取り込み中" = "Importing to Photos";
+"アプリに戻ると、残りを続けて取り込みます" = "Return to Tethr to import the rest";

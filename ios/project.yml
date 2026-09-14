@@ -33,6 +33,8 @@ targets:
         UIBackgroundModes:
           - location
         NSSupportsLiveActivities: true
+        BGTaskSchedulerPermittedIdentifiers:
+          - app.tethr.TethrTouch.import
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

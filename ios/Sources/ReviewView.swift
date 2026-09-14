@@ -50,7 +50,7 @@ struct ReviewView: View {
         .statusBarHidden()
         .task(id: session.selection) { await refresh() }
         // 取り込みが済んだら、端末内のファイルから大きな絵を作り直す
-        .onChange(of: shot?.localURL) { _, url in
+        .onChange(of: shot?.previewURL) { _, url in
             guard let url else { return }
             Task { fullImage = await Preview.load(url) }
         }
@@ -245,7 +245,7 @@ struct ReviewView: View {
         zoom = 1; offset = .zero; offsetAtStart = .zero
         fullImage = nil
         if let shot { session.requestPreview(for: shot) }
-        guard let url = shot?.localURL else { return }
+        guard let url = shot?.previewURL else { return }
         fullImage = await Preview.load(url)
     }
 }

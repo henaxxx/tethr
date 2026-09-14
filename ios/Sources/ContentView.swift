@@ -17,14 +17,28 @@ struct ContentView: View {
     @State private var preparingReveal: Date?
     /// 起動直後、つながっているカメラが見つかるまでの猶予。見つからなければ待ち画面を閉じる
     @State private var launching = true
+    /// 複数選択モード（コマを長押しで入る）。露出の操作とシャッターの場所に格子を出す
+    @State private var selecting = false
+    /// 選んだカットの名前。テザーとカードをまたいで持つ
+    @State private var picked: Set<String> = []
+    @State private var selectionStart: String?
 
     var body: some View {
         VStack(spacing: 0) {
             TopBar()
             PreviewSwitcher(live: session.live, fullScreen: $liveFullScreen)
-            PreviewInfoRow(live: session.live, openLiveFullScreen: { liveFullScreen = true })
-            ShotStrip()
-            ControlPanel()
+            PreviewInfoRow(live: session.live, openLiveFullScreen: { liveFullScreen = true }, selecting: selecting)
+            if selecting {
+                SelectionPanel(batch: session.batch, picked: $picked, startName: selectionStart, close: endSelection)
+                    .frame(height: 440)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                Group {
+                    ShotStrip(onLongPress: beginSelection)
+                    ControlPanel()
+                }
+                .transition(.opacity)
+            }
         }
         .background(Theme.background)
         .foregroundStyle(Theme.text)
@@ -72,6 +86,12 @@ struct ContentView: View {
             #if DEBUG
             if CameraSession.demoRequested {
                 session.loadDemo()
+                // -demoSelect で、複数選択モードの見た目を確かめる（数枚を選んだ状態で入る）
+                if ProcessInfo.processInfo.arguments.contains("-demoSelect"), session.shots.count > 3 {
+                    try? await Task.sleep(for: .milliseconds(600))
+                    beginSelection(session.shots[2])
+                    picked.formUnion(session.shots[3...4].map(\.name))
+                }
                 return
             }
             #endif
@@ -81,6 +101,26 @@ struct ContentView: View {
 }
 
 extension ContentView {
+    /// コマを長押しした。そのコマを選んだ状態で複数選択モードに入る
+    fileprivate func beginSelection(_ shot: Shot) {
+        guard !selecting, session.isConnected || !session.shots.isEmpty else { return }
+        Haptics.toggle()
+        // 選んでいる間は上の欄に選んだコマを出す。映像は止める
+        if session.live.isActive { Task { await session.live.stop(reason: "複数選択") } }
+        session.batch.clearResult()
+        picked = [shot.name]
+        selectionStart = shot.name
+        session.selection = shot.id
+        withAnimation(.snappy(duration: 0.35)) { selecting = true }
+    }
+
+    fileprivate func endSelection() {
+        withAnimation(.snappy(duration: 0.3)) { selecting = false }
+        picked = []
+        selectionStart = nil
+        session.batch.clearResult()
+    }
+
     /// いま待ち画面を出すべきか。
     ///
     /// 起動直後はカメラが見つかるまで少し待つ。見つかれば準備（カードの下調べ）が終わるまで出し続け、
@@ -352,10 +392,10 @@ struct ShotPreviewArea: View {
             zoom = 1; offset = .zero; offsetAtStart = .zero
             fullImage = nil
             if let shot { session.requestPreview(for: shot) }
-            if let url = shot?.localURL { loadFull(url) }
+            if let url = shot?.previewURL { loadFull(url) }
         }
         // 取り込みが済んだら、端末内のファイルから大きな絵を作り直す
-        .onChange(of: shot?.localURL) { _, url in
+        .onChange(of: shot?.previewURL) { _, url in
             if let url { loadFull(url) }
         }
         .onAppear {
@@ -411,6 +451,8 @@ struct PreviewInfoRow: View {
     @Environment(\.openReview) private var openReview
     @ObservedObject var live: LiveViewController
     let openLiveFullScreen: () -> Void
+    /// 複数選択中は、1 枚ずつの操作（ライブビュー・全画面・取り込み）を出さない
+    var selecting = false
 
     private var shot: Shot? {
         session.shots.first { $0.id == session.selection } ?? session.shots.first
@@ -439,17 +481,19 @@ struct PreviewInfoRow: View {
 
             Spacer(minLength: 8)
 
-            LiveViewToggle(live: live)
+            if !selecting {
+                LiveViewToggle(live: live)
 
-            if live.state != .off || shot != nil {
-                IconButton(systemName: "arrow.up.left.and.arrow.down.right", label: Text("全画面")) {
-                    live.state == .off ? openReview() : openLiveFullScreen()
+                if live.state != .off || shot != nil {
+                    IconButton(systemName: "arrow.up.left.and.arrow.down.right", label: Text("全画面")) {
+                        live.state == .off ? openReview() : openLiveFullScreen()
+                    }
                 }
-            }
 
-            if live.state == .off, let shot {
-                ImportButton(shot: shot)
-                    .padding(.leading, 4)
+                if live.state == .off, let shot {
+                    ImportButton(shot: shot)
+                        .padding(.leading, 4)
+                }
             }
         }
         .padding(.leading, 14)
@@ -469,7 +513,7 @@ struct ImportButton: View {
 
     var body: some View {
         let progress = session.importProgress[shot.name]
-        let done = shot.localURL != nil && progress == nil
+        let done = shot.imported && progress == nil
 
         Button(action: start) {
             HStack(spacing: 5) {
@@ -499,14 +543,14 @@ struct ImportButton: View {
     }
 
     private func label(progress: Double?, done: Bool) -> String {
-        if done { return shot.savedToPhotos ? String(localized: "保存済み") : String(localized: "取り込み済み") }
+        if done { return String(localized: "保存済み") }
         if progress != nil { return String(localized: "取り込み中") }
         return String(localized: "取り込む")
     }
 
     private func start() {
         Task {
-            if await session.importShot(shot) != nil { Haptics.success() }
+            if await session.importShot(shot) { Haptics.success() }
         }
     }
 }
@@ -544,6 +588,8 @@ private struct ImportFill: View {
 /// テザーとカードの切り替えと、コマの並び。1 行にまとめる
 struct ShotStrip: View {
     @EnvironmentObject var session: CameraSession
+    /// 長押しで複数選択を始める
+    var onLongPress: (Shot) -> Void = { _ in }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -554,12 +600,13 @@ struct ShotStrip: View {
                 LazyHStack(spacing: 6) {
                     ForEach(session.shots) { shot in
                         Thumbnail(image: shot.thumbnail, located: shot.location != nil,
-                                  imported: shot.localURL != nil, selected: shot.id == session.selection)
+                                  imported: shot.imported, selected: shot.id == session.selection)
                             .onTapGesture {
                                 guard session.selection != shot.id else { return }
                                 Haptics.select()
                                 session.selection = shot.id
                             }
+                            .onLongPressGesture(minimumDuration: 0.4) { onLongPress(shot) }
                             .onAppear { session.requestThumbnail(for: shot) }
                     }
                 }

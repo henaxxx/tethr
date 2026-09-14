@@ -1,4 +1,5 @@
 import SwiftUI
+import TethrUI
 
 /// 写真を画面いっぱいで確認するモード。
 ///

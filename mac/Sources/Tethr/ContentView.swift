@@ -1,73 +1,60 @@
 import SwiftUI
 import TethrKit
+import TethrUI
 
+/// 撮影の画面。写真が主役で、操作は右のパネルに寄せる。
+///
+/// iOS 版と同じく、暗いグレーに琥珀色を 1 色だけ置き、写真の上には何も重ねない。
+/// ファイル名や拡大操作は写真の下の行に、露出の操作とシャッターは右パネルに置く
 struct ContentView: View {
     @EnvironmentObject var model: SessionModel
+    @StateObject private var zoom = PreviewZoom()
     @State private var showInspector = true
 
     var body: some View {
         VStack(spacing: 0) {
-            StatusBar()
             if model.destinationProblem != nil || !model.failedTransfers.isEmpty {
-                Divider()
                 DestinationWarning()
             }
-            Divider()
-            PreviewPane()
-            Divider()
+            PreviewPane(zoom: zoom)
+            PreviewInfoRow(zoom: zoom)
             Filmstrip()
-                .frame(height: 132)
         }
+        .background(Theme.background)
+        .foregroundStyle(Theme.text)
         .inspector(isPresented: $showInspector) {
             ShootingInspector()
-                .inspectorColumnWidth(min: 268, ideal: 300, max: 380)
+                .inspectorColumnWidth(min: 280, ideal: 310, max: 380)
         }
         .toolbar {
-            ToolbarItemGroup(placement: .navigation) {
-                Button {
-                    model.isConnected ? model.disconnect() : model.connect()
-                } label: {
-                    Label(model.isConnected ? "切断" : "接続",
-                          systemImage: model.isConnected ? "cable.connector.slash" : "cable.connector")
-                        .labelStyle(.titleAndIcon)
-                }
-                .disabled(model.state == .connecting)
-
-                Button {
-                    model.toggleLiveView()
-                } label: {
-                    Label("ライブビュー", systemImage: model.isLive ? "eye.fill" : "eye")
-                        .labelStyle(.titleAndIcon)
-                }
-                .disabled(!model.isConnected)
-                .help("ミラーアップして映像を受け取ります")
-
-                Button {
-                    model.autofocus()
-                } label: {
-                    Label("AF", systemImage: "viewfinder.circle")
-                        .labelStyle(.titleAndIcon)
-                }
-                .disabled(!model.isConnected || model.afState == .running)
-                .keyboardShortcut("f", modifiers: .command)
-                .help("AF を実行（シャッター半押し相当）")
-
-                Button {
-                    model.shoot()
-                } label: {
-                    Label("シャッター", systemImage: "camera.shutter.button")
-                        .labelStyle(.titleAndIcon)
-                }
-                .disabled(!model.isConnected || model.busy)
-                .keyboardShortcut(.space, modifiers: [])
+            ToolbarItem(placement: .navigation) {
+                CameraMenu()
             }
-
+            ToolbarItemGroup(placement: .principal) {
+                LiveViewButton()
+                AutofocusButton()
+            }
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    NSWorkspace.shared.open(model.effectiveDestination)
+                } label: {
+                    Label(model.effectiveDestination.lastPathComponent, systemImage: "folder")
+                        .labelStyle(.titleAndIcon)
+                }
+                .help(model.effectiveDestination.path)
+
                 Button { showInspector.toggle() } label: {
                     Label("撮影設定", systemImage: "sidebar.trailing")
                 }
                 .help("撮影設定パネル")
             }
+        }
+        // スペースキーでシャッター。右パネルを閉じていても効くよう、画面全体に持たせる
+        .background {
+            Button("") { model.shoot() }
+                .keyboardShortcut(.space, modifiers: [])
+                .disabled(!model.isConnected || model.busy)
+                .hidden()
         }
         .alert("エラー", isPresented: Binding(
             get: { model.lastError != nil },
@@ -88,7 +75,7 @@ struct DestinationWarning: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.amber)
             VStack(alignment: .leading, spacing: 2) {
                 if let problem = model.destinationProblem {
                     Text(problem).font(.system(size: 12, weight: .medium))
@@ -96,7 +83,7 @@ struct DestinationWarning: View {
                 if !model.failedTransfers.isEmpty {
                     Text("転送できなかったコマ: \(model.failedTransfers.joined(separator: ", "))  — カメラのカードには残っています")
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.dim)
                         .lineLimit(2)
                 }
             }
@@ -105,73 +92,71 @@ struct DestinationWarning: View {
                 .controlSize(.small)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .background(Color.orange.opacity(0.12))
+        .padding(.vertical, 8)
+        .background(Theme.amber.opacity(0.14))
     }
 }
 
-// MARK: - 上部ステータス
+// MARK: - ツールバー
 
-struct StatusBar: View {
+/// 機種名。押すとファームウェア・時計・電池と、めったに使わない操作（切断など）が並ぶ
+struct CameraMenu: View {
     @EnvironmentObject var model: SessionModel
 
     var body: some View {
-        HStack(spacing: 16) {
-            HStack(spacing: 6) {
-                Circle().fill(statusColor).frame(width: 8, height: 8)
-                Text(statusText).font(.system(size: 12, weight: .medium))
-            }
-
-            switch model.afState {
-            case .running:
-                HStack(spacing: 5) {
-                    ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 12, height: 12)
-                    Text("AF 実行中").font(.system(size: 12))
+        Menu {
+            if model.isConnected {
+                Section {
+                    if let info = model.deviceInfo {
+                        if !info.version.isEmpty { Text("ファームウェア \(info.version)") }
+                        if !info.serialNumber.isEmpty { Text("S/N \(info.serialNumber)") }
+                    }
+                    if let focal = model.currentFocalLength {
+                        Text("焦点距離 \(focal)")
+                    }
+                    if let battery = model.batteryPercent {
+                        Text("カメラの電池 \(BatteryIcon.rangeText(battery))")
+                    }
+                    if let clock = model.clockOffsetDescription {
+                        Text("カメラの時計: \(clock)")
+                    }
                 }
-            case .succeeded:
-                Label("AF 完了", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 12)).foregroundStyle(.green)
-            case .failed:
-                Label("AF 失敗", systemImage: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12)).foregroundStyle(.orange)
-                    .help(model.afFailureDetail ?? "")
-            case .idle:
-                EmptyView()
+                Section {
+                    Button("時計を Mac に合わせる") { model.syncClock() }
+                    Button("本体の操作を戻す") { model.releaseCameraControl() }
+                }
+                Section {
+                    Button("切断") { model.disconnect() }
+                }
+            } else {
+                Button("接続") { model.connect() }
+                    .disabled(model.state == .connecting)
             }
-
-            if let buf = model.bufferRemaining {
-                Label("バッファ \(buf)", systemImage: "square.stack.3d.up")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-            }
-
-            Spacer()
-            if model.isConnected { LightMeterView(value: model.lightMeter) }
-            Spacer()
-
-            Button {
-                NSWorkspace.shared.open(model.effectiveDestination)
-            } label: {
-                Label(model.effectiveDestination.lastPathComponent, systemImage: "folder")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.secondary)
-            .help(model.effectiveDestination.path)
-
-            Text("\(model.shots.count) 枚")
-                .font(.system(size: 12).monospacedDigit())
-                .foregroundStyle(.secondary)
+        } label: {
+            // ツールバーのメニューは図形を落として文字だけ描くので、点も文字の一部として埋め込む
+            let dot = Text(Image(systemName: model.state == .connecting ? "circle.dotted" : "circle.fill"))
+                .font(.system(size: 7))
+                .foregroundStyle(dotColor)
+            Text("\(dot)  \(statusText)")
+                .font(.system(size: 13, weight: model.isConnected ? .semibold : .regular))
+                .lineLimit(1)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .menuIndicator(.visible)
+        .fixedSize()
+        .help(detail ?? "")
     }
 
-    private var statusColor: Color {
+    /// つながらない理由。ツールバーには短く出し、詳しくはここと写真の欄に出す
+    private var detail: String? {
+        if case .failed(let message) = model.state { return message }
+        return nil
+    }
+
+    private var dotColor: Color {
         switch model.state {
-        case .connected: return .green
-        case .connecting: return .orange
-        case .failed: return .red
-        case .disconnected: return .secondary
+        case .connected: return Theme.amber
+        case .failed: return Theme.danger
+        case .connecting, .disconnected: return Theme.dimmer
         }
     }
 
@@ -179,59 +164,88 @@ struct StatusBar: View {
         switch model.state {
         case .connected(let m): return m
         case .connecting: return model.preparing ? String(localized: "カードを確認中…") : String(localized: "接続中…")
-        case .failed(let e): return e
-        case .disconnected: return String(localized: "未接続")
+        case .failed, .disconnected: return String(localized: "未接続")
         }
     }
 }
 
-struct LightMeterView: View {
-    let value: Double?
+struct LiveViewButton: View {
+    @EnvironmentObject var model: SessionModel
 
     var body: some View {
-        let ev = max(-3, min(3, value ?? 0))
-        HStack(spacing: 8) {
-            Text("−3").font(.system(size: 9)).foregroundStyle(.tertiary)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    HStack(spacing: 0) {
-                        ForEach(0..<13) { i in
-                            Rectangle()
-                                .fill(i % 2 == 0 ? Color.secondary.opacity(0.45) : Color.secondary.opacity(0.2))
-                                .frame(width: 1, height: i == 6 ? 12 : (i % 2 == 0 ? 8 : 5))
-                            if i < 12 { Spacer(minLength: 0) }
-                        }
-                    }
-                    .frame(height: 12)
-
-                    if value != nil {
-                        Capsule()
-                            .fill(abs(ev) < 0.2 ? Color.green : Color.orange)
-                            .frame(width: 3, height: 14)
-                            .offset(x: (geo.size.width - 3) * ((ev + 3) / 6))
-                            .animation(.easeOut(duration: 0.12), value: ev)
-                    }
-                }
-                .frame(height: 14)
-            }
-            .frame(width: 180, height: 14)
-            Text("+3").font(.system(size: 9)).foregroundStyle(.tertiary)
-            Text(value.map { String(format: "%+.1f", $0) } ?? "—")
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 34, alignment: .leading)
+        Button {
+            model.toggleLiveView()
+        } label: {
+            Label("ライブビュー", systemImage: model.isLive ? "eye.fill" : "eye")
+                .labelStyle(.titleAndIcon)
+                .foregroundStyle(model.isLive ? AnyShapeStyle(Theme.amber) : AnyShapeStyle(.primary))
         }
+        .disabled(!model.isConnected)
+        .help("ミラーアップして映像を受け取ります（⌘L）")
+    }
+}
+
+struct AutofocusButton: View {
+    @EnvironmentObject var model: SessionModel
+
+    var body: some View {
+        Button {
+            model.autofocus()
+        } label: {
+            Label {
+                Text("AF")
+            } icon: {
+                switch model.afState {
+                case .running: ProgressView().controlSize(.mini)
+                case .succeeded: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.amber)
+                case .failed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
+                case .idle: Image(systemName: "viewfinder.circle")
+                }
+            }
+            .labelStyle(.titleAndIcon)
+        }
+        .disabled(!model.isConnected || model.afState == .running)
+        .keyboardShortcut("f", modifiers: .command)
+        .help(model.afFailureDetail ?? String(localized: "AF を実行（シャッター半押し相当、⌘F）"))
     }
 }
 
 // MARK: - プレビュー（拡大・パン対応）
 
+/// 拡大の状態。写真の下の行の操作ボタンと、写真そのものの両方から触る
+@MainActor
+final class PreviewZoom: ObservableObject {
+    /// 1 = ウィンドウにフィット
+    @Published var zoom: CGFloat = 1
+    @Published var offset: CGSize = .zero
+    var offsetAtDragStart: CGSize = .zero
+    /// フィット時の倍率（画素 1 つあたりの表示点数）。等倍表示に使う
+    @Published var fit: CGFloat = 1
+
+    var percent: Int { Int((fit * zoom * 100).rounded()) }
+    var zoomedIn: Bool { zoom > 1.02 }
+
+    func set(_ new: CGFloat) {
+        let z = min(max(new, 1), 12)
+        withAnimation(.easeOut(duration: 0.15)) {
+            zoom = z
+            if z <= 1.02 { offset = .zero }
+        }
+        if z <= 1.02 { offsetAtDragStart = .zero }
+    }
+
+    func reset() {
+        zoom = 1
+        offset = .zero
+        offsetAtDragStart = .zero
+    }
+
+    func actualSize() { set(1 / max(fit, 0.0001)) }
+}
+
 struct PreviewPane: View {
     @EnvironmentObject var model: SessionModel
-
-    @State private var zoom: CGFloat = 1          // 1 = ウィンドウにフィット
-    @State private var offset: CGSize = .zero
-    @State private var offsetAtDragStart: CGSize = .zero
+    @ObservedObject var zoom: PreviewZoom
     @GestureState private var pinch: CGFloat = 1
 
     private var selected: Shot? {
@@ -246,9 +260,12 @@ struct PreviewPane: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color(nsColor: .textBackgroundColor).opacity(0.35)
+                Theme.background
 
-                if model.isLive {
+                if model.preparing {
+                    // 電源を入れた直後は、カードの下調べが終わるまで何も通らない
+                    PreparingOverlay(count: nil, reveal: nil)
+                } else if model.isLive {
                     if let frame = model.liveFrame {
                         Image(nsImage: frame)
                             .resizable()
@@ -256,42 +273,19 @@ struct PreviewPane: View {
                             .aspectRatio(contentMode: .fit)
                             .padding(12)
                     } else {
-                        VStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("ライブビュー開始中…")
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
-                        }
+                        ProgressView().controlSize(.regular)
                     }
-
-                    VStack {
-                        HStack {
-                            HStack(spacing: 5) {
-                                Circle().fill(.red).frame(width: 7, height: 7)
-                                Text("LIVE").font(.system(size: 10, weight: .bold, design: .rounded))
-                                if model.liveFPS > 0 {
-                                    Text("\(model.liveFPS) fps")
-                                        .font(.system(size: 10).monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.regularMaterial, in: Capsule())
-                            Spacer()
-                        }
-                        Spacer()
-                    }
-                    .padding(12)
-                } else if let shot = selected {
+                } else if selected != nil {
                     if let img = image {
                         let fit = fitScale(image: img, in: geo.size)
-                        let effective = zoom * pinch
+                        let effective = zoom.zoom * pinch
 
                         Image(nsImage: img)
                             .resizable()
                             .interpolation(.high)
                             .aspectRatio(contentMode: .fit)
                             .scaleEffect(effective)
-                            .offset(clamped(offset, image: img, fit: fit, zoom: effective, view: geo.size))
+                            .offset(clamped(zoom.offset, image: img, fit: fit, zoom: effective, view: geo.size))
                             .frame(width: geo.size.width, height: geo.size.height)
                             .clipped()
                             .contentShape(Rectangle())
@@ -300,45 +294,36 @@ struct PreviewPane: View {
                             .onTapGesture(coordinateSpace: .local) { location in
                                 zoomToggle(at: location, image: img, fit: fit, view: geo.size)
                             }
-
-                        VStack {
-                            Spacer()
-                            HStack(alignment: .bottom) {
-                                InfoStrip(shot: shot)
-                                Spacer()
-                                ZoomControls(
-                                    percent: Int((fit * effective * 100).rounded()),
-                                    canZoomOut: zoom > 1.02,
-                                    zoomIn: { setZoom(zoom * 1.5) },
-                                    zoomOut: { setZoom(zoom / 1.5) },
-                                    fit: { setZoom(1) },
-                                    actual: { setZoom(1 / fit) }
-                                )
-                            }
-                            .padding(12)
-                        }
+                            .onAppear { zoom.fit = fit }
+                            .onChange(of: fit) { _, value in zoom.fit = value }
                     } else {
-                        ProgressView().controlSize(.small)
+                        ProgressView().controlSize(.regular)
                     }
                 } else {
-                    VStack(spacing: 10) {
-                        Image(systemName: "camera.macro")
+                    VStack(spacing: 12) {
+                        Image(systemName: "camera.aperture")
                             .font(.system(size: 40, weight: .ultraLight))
-                            .foregroundStyle(.tertiary)
-                        Text(model.isConnected
-                             ? "カメラのシャッターを押すと、ここに表示されます"
-                             : "「接続」を押してください")
+                            .foregroundStyle(Theme.dimmer)
+                        Text(emptyMessage)
                             .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.dim)
                     }
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: model.selection) { _, newValue in
-            zoom = 1
-            offset = .zero
+            zoom.reset()
             model.loadFullPreview(for: newValue)
+        }
+    }
+
+    private var emptyMessage: String {
+        switch model.state {
+        case .connected: return String(localized: "カメラのシャッターを押すと、ここに表示されます")
+        case .failed(let message): return message
+        case .connecting: return String(localized: "接続中…")
+        case .disconnected: return String(localized: "カメラを USB で接続してください")
         }
     }
 
@@ -350,26 +335,17 @@ struct PreviewPane: View {
         return min(view.width / w, view.height / h)
     }
 
-    private func setZoom(_ new: CGFloat) {
-        let z = min(max(new, 1), 12)
-        withAnimation(.easeOut(duration: 0.15)) {
-            zoom = z
-            if z <= 1.02 { offset = .zero }
-        }
-        if z <= 1.02 { offsetAtDragStart = .zero }
-    }
-
     /// クリック 1 回でフィットと等倍を往復する（Lightroom と同じ操作感）。
     /// 拡大するときは、クリックした場所が画面中央に来るように寄せる。
     /// 単に倍率だけ上げると画面中心が拡大されてしまい、
     /// 見たかった場所がフレームの外へ出ていく。
     private func zoomToggle(at point: CGPoint, image: NSImage, fit: CGFloat, view: CGSize) {
-        if zoom > 1.02 {
+        if zoom.zoomedIn {
             withAnimation(.easeOut(duration: 0.18)) {
-                zoom = 1
-                offset = .zero
+                zoom.zoom = 1
+                zoom.offset = .zero
             }
-            offsetAtDragStart = .zero
+            zoom.offsetAtDragStart = .zero
             return
         }
 
@@ -379,38 +355,38 @@ struct PreviewPane: View {
         guard fitW > 0, fitH > 0 else { return }
 
         // クリック位置が画像のどこか（中心を 0 とした割合）
-        let centerX = view.width / 2 + offset.width
-        let centerY = view.height / 2 + offset.height
-        let nx = (point.x - centerX) / (fitW * zoom)
-        let ny = (point.y - centerY) / (fitH * zoom)
+        let centerX = view.width / 2 + zoom.offset.width
+        let centerY = view.height / 2 + zoom.offset.height
+        let nx = (point.x - centerX) / (fitW * zoom.zoom)
+        let ny = (point.y - centerY) / (fitH * zoom.zoom)
 
         // その点が画面中央に来る位置へ動かす
         let wanted = CGSize(width: -nx * fitW * target, height: -ny * fitH * target)
         let settled = clamped(wanted, image: image, fit: fit, zoom: target, view: view)
 
         withAnimation(.easeOut(duration: 0.18)) {
-            zoom = target
-            offset = settled
+            zoom.zoom = target
+            zoom.offset = settled
         }
-        offsetAtDragStart = settled
+        zoom.offsetAtDragStart = settled
     }
 
     private var magnifyGesture: some Gesture {
         MagnifyGesture()
             .updating($pinch) { value, state, _ in state = value.magnification }
-            .onEnded { value in setZoom(zoom * value.magnification) }
+            .onEnded { value in zoom.set(zoom.zoom * value.magnification) }
     }
 
     private func panGesture(image: NSImage, fit: CGFloat, view: CGSize) -> some Gesture {
         DragGesture()
             .onChanged { value in
-                guard zoom > 1.02 else { return }
-                offset = CGSize(width: offsetAtDragStart.width + value.translation.width,
-                                height: offsetAtDragStart.height + value.translation.height)
+                guard zoom.zoomedIn else { return }
+                zoom.offset = CGSize(width: zoom.offsetAtDragStart.width + value.translation.width,
+                                     height: zoom.offsetAtDragStart.height + value.translation.height)
             }
             .onEnded { _ in
-                offset = clamped(offset, image: image, fit: fit, zoom: zoom, view: view)
-                offsetAtDragStart = offset
+                zoom.offset = clamped(zoom.offset, image: image, fit: fit, zoom: zoom.zoom, view: view)
+                zoom.offsetAtDragStart = zoom.offset
             }
     }
 
@@ -425,61 +401,83 @@ struct PreviewPane: View {
     }
 }
 
-private struct InfoStrip: View {
+/// 写真のすぐ下の段。左にファイル名と露出（ライブビュー中は映像の状態）、右に拡大の操作
+struct PreviewInfoRow: View {
     @EnvironmentObject var model: SessionModel
-    let shot: Shot
+    @ObservedObject var zoom: PreviewZoom
+
+    private var selected: Shot? {
+        model.shots.first { $0.id == model.selection } ?? model.shots.first
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Text(shot.name).font(.system(size: 11, weight: .medium))
-            if !shot.meta.summary.isEmpty {
-                Text(shot.meta.summary).font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.secondary)
+            if model.isLive {
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.live).frame(width: 7, height: 7)
+                    Text("LIVE").font(.system(size: 11, weight: .bold))
+                    if model.liveFPS > 0 {
+                        Text("\(model.liveFPS) fps")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.dim)
+                    }
+                }
+            } else if let shot = selected {
+                Text(shot.name).font(.system(size: 12, weight: .medium))
+                if !shot.meta.summary.isEmpty {
+                    Text(shot.meta.summary)
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Theme.dim)
+                }
+                if shot.meta.pixelWidth > 0 {
+                    Text("\(shot.meta.pixelWidth)×\(shot.meta.pixelHeight)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(Theme.dimmer)
+                }
+                Button {
+                    model.revealInFinder(shot)
+                } label: {
+                    Image(systemName: "folder").font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.dim)
+                .help("Finder で表示")
             }
-            if shot.meta.pixelWidth > 0 {
-                Text("\(shot.meta.pixelWidth)×\(shot.meta.pixelHeight)")
-                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+
+            Spacer(minLength: 8)
+
+            if !model.isLive, !model.preparing, selected != nil {
+                ZoomControls(zoom: zoom)
             }
-            Button {
-                model.revealInFinder(shot)
-            } label: {
-                Image(systemName: "folder").font(.system(size: 10))
-            }
-            .buttonStyle(.borderless)
-            .help("Finder で表示")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.regularMaterial, in: Capsule())
+        .lineLimit(1)
+        .padding(.horizontal, 14)
+        .frame(height: 40)
     }
 }
 
 private struct ZoomControls: View {
-    let percent: Int
-    let canZoomOut: Bool
-    let zoomIn: () -> Void
-    let zoomOut: () -> Void
-    let fit: () -> Void
-    let actual: () -> Void
+    @ObservedObject var zoom: PreviewZoom
 
     var body: some View {
         HStack(spacing: 2) {
-            Button(action: zoomOut) { Image(systemName: "minus.magnifyingglass") }
-                .disabled(!canZoomOut)
-            Text("\(percent)%")
+            Button { zoom.set(zoom.zoom / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
+                .disabled(!zoom.zoomedIn)
+            Text("\(zoom.percent)%")
                 .font(.system(size: 11).monospacedDigit())
-                .frame(width: 46)
-            Button(action: zoomIn) { Image(systemName: "plus.magnifyingglass") }
+                .foregroundStyle(Theme.dim)
+                .frame(width: 42)
+            Button { zoom.set(zoom.zoom * 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
             Divider().frame(height: 14)
-            Button(action: fit) { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+            Button { zoom.set(1) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
                 .help("フィット")
-            Button(action: actual) { Image(systemName: "1.square") }
+            Button { zoom.actualSize() } label: { Image(systemName: "1.square") }
                 .help("等倍表示")
         }
         .buttonStyle(.borderless)
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(.regularMaterial, in: Capsule())
+        .glassCapsule()
     }
 }
 
@@ -489,145 +487,268 @@ struct Filmstrip: View {
     @EnvironmentObject var model: SessionModel
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: true) {
-            LazyHStack(spacing: 8) {
-                ForEach(model.shots) { shot in
-                    ZStack {
-                        if let img = shot.thumbnail {
-                            Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                        } else {
-                            Rectangle().fill(.quaternary)
-                            ProgressView().controlSize(.small)
-                        }
+        HStack(spacing: 12) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 6) {
+                    ForEach(model.shots) { shot in
+                        Thumbnail(image: shot.thumbnail, selected: shot.id == model.selection)
+                            .onTapGesture { model.selection = shot.id }
+                            .help(shot.name)
                     }
-                    .frame(width: 150, height: 100)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .strokeBorder(shot.id == model.selection ? Color.accentColor : Color.clear,
-                                          lineWidth: 2)
-                    )
-                    .onTapGesture { model.selection = shot.id }
-                    .help(shot.name)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+
+            HStack(spacing: 10) {
+                Text("\(model.shots.count) 枚")
+                if let buffer = model.bufferRemaining {
+                    Label("バッファ \(buffer)", systemImage: "square.stack.3d.up")
+                        .help("連写であと何コマ撮れるか")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 14)
+            .font(.system(size: 11).monospacedDigit())
+            .foregroundStyle(Theme.dim)
+            .padding(.trailing, 14)
+            .fixedSize()
         }
+        .frame(height: 84)
+        .background(Theme.surface.opacity(0.5))
     }
 }
 
-// MARK: - 撮影設定インスペクタ
+/// コマ 1 枚。表示に使う値だけを受け取る（`Shot` を渡すと ID しか比べられず、サムネイルが届いても描き直されない）
+private struct Thumbnail: View {
+    let image: NSImage?
+    let selected: Bool
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle().fill(Theme.surfaceRaised)
+                ProgressView().controlSize(.mini)
+            }
+        }
+        .frame(width: 96, height: 64)
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(selected ? Theme.amber : .clear, lineWidth: 2)
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - 撮影設定パネル
 
 struct ShootingInspector: View {
     @EnvironmentObject var model: SessionModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                CameraBadge()
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("撮影設定")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-
-                    if let mode = model.props[.exposureProgram], !mode.choices.isEmpty {
-                        Picker("", selection: model.textBinding(for: .exposureProgram)) {
-                            ForEach(mode.choiceTexts, id: \.self) { Text($0).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .disabled(!model.isWritable(.exposureProgram))
-                        .help("露出モード")
-                    } else if let mode = model.props[.exposureProgram] {
-                        Text(mode.currentText)
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 6).padding(.vertical, 2)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    CameraSummary()
+                    if model.isConnected {
+                        ExposureSection()
+                        PictureSection()
+                    } else {
+                        Text("カメラをつなぐと、ここで露出や画質を変えられます。")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.dim)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    VStack(spacing: 10) {
-                        scrubber("シャッター", model.shutterProp)
-                        scrubber("絞り", .fNumber)
-                        scrubber("ISO", .iso)
-                        scrubber("露出補正", .exposureBias)
-                    }
-                    .padding(.top, 2)
                 }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator, lineWidth: 1))
-                )
+                .padding(16)
+            }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("フォーカス")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
+            ShutterButton(size: 62, busy: model.busy, enabled: model.isConnected) {
+                model.shoot()
+            }
+            .help("シャッター（スペース / ⌘T）")
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 18)
+        }
+        .foregroundStyle(Theme.text)
+    }
+}
 
-                    if let mode = model.props[.focusMode] {
-                        HStack {
-                            Text("モード").font(.system(size: 11)).foregroundStyle(.secondary)
-                            Spacer()
-                            Text(mode.currentText).font(.system(size: 11, weight: .medium))
+private struct SectionHeader: View {
+    let title: LocalizedStringKey
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Theme.dim)
+    }
+}
+
+/// 機種・焦点距離・電池を 1 行で
+private struct CameraSummary: View {
+    @EnvironmentObject var model: SessionModel
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(model.isConnected ? model.modelName : String(localized: "未接続"))
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .foregroundStyle(model.isConnected ? Theme.text : Theme.dim)
+            Spacer()
+            if let focal = model.currentFocalLength {
+                Text(focal)
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundStyle(Theme.dim)
+            }
+            if let battery = model.batteryPercent {
+                BatteryIcon(level: battery)
+            }
+        }
+    }
+}
+
+/// カメラの電池。D300 は残量を 20% 刻みの切り上げで返すので、数字ではなく段階のアイコンにする（iOS 版と同じ）
+struct BatteryIcon: View {
+    let level: Int
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 14))
+            .foregroundStyle(level <= 20 ? Theme.danger : Theme.dim)
+            .help(Text("カメラの電池 \(Self.rangeText(level))"))
+    }
+
+    static func rangeText(_ level: Int) -> String {
+        level >= 100 ? String(localized: "満充電") : String(localized: "\(max(0, level - 19))〜\(level)%")
+    }
+
+    private var symbol: String {
+        switch level {
+        case 81...:   return "battery.100percent"
+        case 61...80: return "battery.75percent"
+        case 41...60: return "battery.50percent"
+        case 1...40:  return "battery.25percent"
+        default:      return "battery.0percent"
+        }
+    }
+}
+
+/// 撮影モード → 露出計かカメラ任せの値 → モードに合わせたスクラバー
+private struct ExposureSection: View {
+    @EnvironmentObject var model: SessionModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "露出")
+
+            if let mode = model.props[.exposureProgram], !mode.choices.isEmpty {
+                // 選択肢はカメラが申告したものをそのまま出す。機種によって並びも項目数も違う
+                Picker("", selection: model.textBinding(for: .exposureProgram)) {
+                    ForEach(mode.choiceTexts, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .disabled(!model.isWritable(.exposureProgram))
+                .help("露出モード")
+            }
+
+            HStack(spacing: 12) {
+                if model.lightMeterMeaningful {
+                    Text("露出計")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.dim)
+                    LightMeterView(value: model.lightMeter)
+                } else {
+                    ForEach(model.cameraDecided, id: \.self) { prop in
+                        if let desc = model.props[prop] {
+                            HStack(spacing: 5) {
+                                Text(prop.label)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Theme.dim)
+                                Text(desc.currentText)
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
+                                    .contentTransition(.numericText())
+                                    .animation(.snappy(duration: 0.18), value: desc.current)
+                            }
+                        }
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(height: 20)
+
+            VStack(spacing: 6) {
+                ForEach(model.adjustable, id: \.self) { prop in
+                    ScrubberControl(title: prop.label,
+                                    options: model.props[prop]?.choiceTexts ?? [],
+                                    selection: model.textBinding(for: prop),
+                                    enabled: model.isWritable(prop))
+                }
+            }
+        }
+    }
+}
+
+/// 白バランス・画質・フォーカス
+private struct PictureSection: View {
+    @EnvironmentObject var model: SessionModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "画質とフォーカス")
+
+            if let wb = model.props[.whiteBalance], !wb.choices.isEmpty {
+                row("白バランス") {
+                    Picker("", selection: model.textBinding(for: .whiteBalance)) {
+                        ForEach(wb.choiceTexts, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(!model.isWritable(.whiteBalance))
+                }
+            }
+            if let quality = model.props[.compressionSetting], !quality.choices.isEmpty {
+                row("画質") {
+                    Picker("", selection: model.textBinding(for: .compressionSetting)) {
+                        ForEach(quality.choiceTexts, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .disabled(!model.isWritable(.compressionSetting))
+                }
+            }
+            if let focus = model.props[.focusMode] {
+                row("AF モード") {
+                    HStack(spacing: 4) {
+                        Text(focus.currentText).font(.system(size: 12, weight: .medium))
+                        if !focus.writable {
                             Image(systemName: "lock.fill")
-                                .font(.system(size: 8)).foregroundStyle(.tertiary)
+                                .font(.system(size: 8))
+                                .foregroundStyle(Theme.dimmer)
                                 .help("本体の AF モードスイッチで切り替えます")
                         }
                     }
-
-                    Toggle("シャッター時に AF する", isOn: $model.autofocusBeforeShot)
-                        .font(.system(size: 11))
-                        .controlSize(.small)
-
-                    Button {
-                        model.autofocus()
-                    } label: {
-                        Label("AF を実行", systemImage: "viewfinder.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .controlSize(.small)
-                    .disabled(!model.isConnected || model.afState == .running)
                 }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator, lineWidth: 1))
-                )
-
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach([PTP.Prop.whiteBalance, .compressionSetting], id: \.self) { prop in
-                        if let desc = model.props[prop], !desc.choices.isEmpty {
-                            Picker(Self.labels[prop] ?? prop.label, selection: model.textBinding(for: prop)) {
-                                ForEach(desc.choiceTexts, id: \.self) { Text($0).tag($0) }
-                            }
-                            .controlSize(.small)
-                            .disabled(!model.isWritable(prop))
-                        }
-                    }
-                }
-
-                Spacer(minLength: 0)
             }
-            .padding(12)
+            row("撮影前に AF") {
+                Toggle("", isOn: $model.autofocusBeforeShot)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+                    .tint(Theme.amber)
+            }
         }
     }
 
-    static var labels: [PTP.Prop: String] {
-        [.whiteBalance: String(localized: "WB"),
-         .compressionSetting: String(localized: "画質")]
-    }
-
-    private func scrubber(_ title: LocalizedStringKey, _ prop: PTP.Prop) -> some View {
-        ScrubberControl(title: title,
-                        options: model.props[prop]?.choiceTexts ?? [],
-                        format: { $0 },
-                        selection: model.textBinding(for: prop),
-                        enabled: model.isWritable(prop),
-                        locked: model.props[prop].map { !$0.writable } ?? false)
+    private func row<Content: View>(_ title: LocalizedStringKey, @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.dim)
+            Spacer()
+            content()
+        }
+        .frame(minHeight: 26)
     }
 }

@@ -43,7 +43,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// （D300 で確認。半押しで変わるのは 0x500D だけで、0xD1B1 は動かなかった）。
     /// 出しっぱなしにすると壊れているように見えるので、M 以外では隠す。
     var lightMeterMeaningful: Bool {
-        props[.exposureProgram]?.current == 1 && lightMeterAvailable   // PTP の ExposureProgramMode: 1 = Manual
+        ExposureLayout.meterMeaningful(in: props) && lightMeterAvailable
     }
     /// 撮影地点を記録するか。カメラ側には書けないので、
     /// 取り込み時に写真アプリへ渡す形で残す。
@@ -170,37 +170,11 @@ final class CameraSession: NSObject, ObservableObject {
     private var deferredThumbnails: Set<String> = []
     private var prefetchTask: Task<Void, Never>?
 
-    private var shutterProp: PTP.Prop {
-        (props[.nikonExposureTime]?.choices.isEmpty == false) ? .nikonExposureTime : .exposureTime
-    }
-
-    /// スクラバーで操作する設定。撮影モードで、利用者が決める値だけを並べる。
-    ///
-    /// 以前は常にシャッター・絞り・ISO の 3 本で、A モードではシャッターが押せないまま場所を取り、
-    /// A・S・P で一番触る露出補正は表示だけだった
-    var adjustable: [PTP.Prop] {
-        let candidates: [PTP.Prop]
-        switch props[.exposureProgram]?.current {          // PTP の ExposureProgramMode
-        case 1: candidates = [shutterProp, .fNumber, .iso]              // M
-        case 2: candidates = [.iso, .exposureBias]                      // P
-        case 3: candidates = [.fNumber, .iso, .exposureBias]            // A
-        case 4: candidates = [shutterProp, .iso, .exposureBias]         // S
-        default:
-            // シーンモードなど。カメラが書き換えを許しているものだけ出す
-            candidates = [shutterProp, .fNumber, .iso, .exposureBias].filter { props[$0]?.writable == true }
-        }
-        return candidates.filter { props[$0]?.choices.isEmpty == false }
-    }
+    /// スクラバーで操作する設定（撮影モードで入れ替わる。規則は TethrKit の ExposureLayout）
+    var adjustable: [PTP.Prop] { ExposureLayout.adjustable(in: props) }
 
     /// カメラ任せになっている露出の値（A モードのシャッターなど）。スクラバーの上に数字だけ出す
-    var cameraDecided: [PTP.Prop] {
-        switch props[.exposureProgram]?.current {
-        case 2: return [shutterProp, .fNumber].filter { props[$0] != nil }
-        case 3: return [shutterProp].filter { props[$0] != nil }
-        case 4: return [.fNumber].filter { props[$0] != nil }
-        default: return []
-        }
-    }
+    var cameraDecided: [PTP.Prop] { ExposureLayout.cameraDecided(in: props) }
 
     /// 軌跡を背面でも取り続けるか。撮影の合間に画面を消しても切れないようにする。
     @Published var trackInBackground = false {

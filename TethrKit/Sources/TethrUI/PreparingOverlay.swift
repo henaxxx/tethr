@@ -6,15 +6,20 @@ import SwiftUI
 /// （カードの枚数に比例し、D300 で 1 件約 17 ミリ秒）。何もできない時間なので、
 /// 固まって見えないよう画面全体で待っていることを伝える。
 /// アイコンと同じ絞り羽根がゆっくり回りながら開閉し、終わると全開になって本来の画面が現れる。
-struct PreparingOverlay: View {
+public struct PreparingOverlay: View {
     /// 前回このカメラで数えたカード内の件数
     let count: Int?
     /// 準備が終わった時刻。ここから絞りを全開にして消える
     let reveal: Date?
 
+    public init(count: Int?, reveal: Date?) {
+        self.count = count
+        self.reveal = reveal
+    }
+
     private let amber = Color(red: 0.96, green: 0.66, blue: 0.26)
 
-    var body: some View {
+    public var body: some View {
         TimelineView(.animation) { timeline in
             VStack(spacing: 0) {
                 Spacer()
@@ -36,7 +41,7 @@ struct PreparingOverlay: View {
                     }
                 }
                 .font(.system(size: 13).monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.dim)
                 .padding(.bottom, 22)
 
                 FilmFrames(time: timeline.date, lit: amber)
@@ -62,7 +67,7 @@ private struct FilmFrames: View {
             ForEach(0..<frames, id: \.self) { i in
                 RoundedRectangle(cornerRadius: 2.5)
                     .fill(lit.opacity(level(i, t)))
-                    .background(RoundedRectangle(cornerRadius: 2.5).fill(Color(uiColor: .tertiarySystemFill)))
+                    .background(RoundedRectangle(cornerRadius: 2.5).fill(Theme.surfaceRaised))
                     .frame(width: 11, height: 15)
             }
         }
@@ -77,14 +82,19 @@ private struct FilmFrames: View {
 }
 
 /// アイコンと同じ 6 枚の絞り羽根。開閉しながらゆっくり回る
-struct ApertureIris: View {
+public struct ApertureIris: View {
     let time: Date
     let reveal: Date?
+
+    public init(time: Date, reveal: Date?) {
+        self.time = time
+        self.reveal = reveal
+    }
 
     private static let blades = 6
     private static let twist = Double.pi / 7   // アイコンと同じひねり
 
-    var body: some View {
+    public var body: some View {
         Canvas { ctx, size in
             let r = min(size.width, size.height) / 2
             let c = CGPoint(x: size.width / 2, y: size.height / 2)

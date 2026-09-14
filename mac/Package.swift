@@ -11,7 +11,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Tethr",
-            dependencies: ["TethrKit"],
+            dependencies: [
+                .product(name: "TethrKit", package: "TethrKit"),
+                .product(name: "TethrUI", package: "TethrKit"),
+            ],
             path: "Sources/Tethr",
             swiftSettings: [
                 .swiftLanguageMode(.v5),

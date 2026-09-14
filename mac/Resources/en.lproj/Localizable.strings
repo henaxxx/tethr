@@ -35,7 +35,7 @@
 "起動時にカメラへ自動接続する" = "Connect to the camera on launch";
 
 /* 撮影 */
-"撮影設定" = "Exposure";
+"撮影設定" = "Shooting settings";
 "撮影設定パネル" = "Exposure panel";
 "露出モード" = "Exposure mode";
 "露出補正" = "Exposure comp.";
@@ -176,3 +176,25 @@
 "シャッターボタンが押されたままです。" = "The shutter button is being held down.";
 "ミラーアップ中はライブビューを使えません。" = "Live view is not available during mirror-up.";
 "記録先をカードに戻せなかったため、撮影をやめました。" = "The shot was cancelled because the recording destination could not be switched back to the card.";
+
+/* 撮影画面（2026-09 の作り直し） */
+"露出" = "Exposure";
+"露出計" = "Meter";
+"画質とフォーカス" = "Quality and focus";
+"白バランス" = "White balance";
+"AF モード" = "AF mode";
+"撮影前に AF" = "Autofocus before each shot";
+"ファームウェア %@" = "Firmware %@";
+"焦点距離 %@" = "Focal length %@";
+"カメラの電池 %@" = "Camera battery %@";
+"カメラの時計: %@" = "Camera clock: %@";
+"満充電" = "Full";
+"%lld〜%lld%%" = "%lld–%lld%%";
+"カメラを USB で接続してください" = "Connect a camera over USB";
+"カメラをつなぐと、ここで露出や画質を変えられます。" = "Connect a camera to change exposure and quality here.";
+"シャッター（スペース / ⌘T）" = "Shutter (Space / ⌘T)";
+"ミラーアップして映像を受け取ります（⌘L）" = "Raises the mirror and streams the image (⌘L)";
+"AF を実行（シャッター半押し相当、⌘F）" = "Autofocus, like a half-press (⌘F)";
+"連写であと何コマ撮れるか" = "Frames left in the camera’s buffer";
+"カードを確認中" = "Checking the card";
+"カード内 %lld 件" = "%lld files on the card";

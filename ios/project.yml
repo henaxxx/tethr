@@ -13,6 +13,7 @@ targets:
     sources: [Sources, Resources]
     dependencies:
       - package: TethrKit
+        products: [TethrKit, TethrUI]
     info:
       path: Info.plist
       properties:

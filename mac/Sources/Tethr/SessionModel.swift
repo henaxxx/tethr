@@ -92,6 +92,16 @@ final class SessionModel: ObservableObject {
         link.onLost = { [weak self] reason in self?.cameraLost(reason) }
         link.onPTPEvent = { [weak self] event in self?.handle(event) }
         link.onFileSaved = { [weak self] url in self?.fileSaved(url) }
+        #if DEBUG
+        // 画面を詰めるとき用。起動引数 -loadShots <フォルダ> で、そのフォルダの NEF を一覧に並べる
+        if let i = CommandLine.arguments.firstIndex(of: "-loadShots"), i + 1 < CommandLine.arguments.count {
+            let dir = URL(fileURLWithPath: (CommandLine.arguments[i + 1] as NSString).expandingTildeInPath)
+            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            for url in files.filter({ ["nef", "jpg"].contains($0.pathExtension.lowercased()) }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                fileSaved(url)
+            }
+        }
+        #endif
         link.onDownloadFailed = { [weak self] name, reason in
             guard let self else { return }
             self.failedTransfers.append(name)
@@ -174,9 +184,16 @@ final class SessionModel: ObservableObject {
     }
 
     /// シャッタースピードの設定。Nikon は正確な分数の独自プロパティを使う
-    var shutterProp: PTP.Prop {
-        (props[.nikonExposureTime]?.choices.isEmpty == false) ? .nikonExposureTime : .exposureTime
-    }
+    var shutterProp: PTP.Prop { ExposureLayout.shutter(in: props) }
+
+    /// スクラバーで操作する設定。撮影モードで入れ替わる（規則は iOS 版と共通の ExposureLayout）
+    var adjustable: [PTP.Prop] { ExposureLayout.adjustable(in: props) }
+
+    /// カメラ任せになっている露出の値（A モードのシャッターなど）
+    var cameraDecided: [PTP.Prop] { ExposureLayout.cameraDecided(in: props) }
+
+    /// 露出計が意味を持つか（Nikon は M モードでだけ振れる）
+    var lightMeterMeaningful: Bool { ExposureLayout.meterMeaningful(in: props) && lightMeter != nil }
 
     /// その項目をいま操作できるか。選択肢が取れていて、かつカメラが書き込めると言っていること。
     /// 露出モードで変わる（A ならシャッター、S なら絞りが固定される）

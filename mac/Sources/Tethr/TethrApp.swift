@@ -1,4 +1,5 @@
 import SwiftUI
+import TethrUI
 
 @main
 struct TethrApp: App {
@@ -12,9 +13,13 @@ struct TethrApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 940, minHeight: 640)
+                // 写真の見え方が周りの明るさで変わらないよう、暗い地に固定する（iOS 版と同じ）
+                .preferredColorScheme(.dark)
+                .tint(Theme.amber)
                 .onAppear { if model.autoConnect { model.connect() } }
         }
         .defaultSize(width: 1240, height: 820)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandMenu("カメラ") {
@@ -54,12 +59,14 @@ struct TethrApp: App {
 
         Window("位置情報を付与", id: "geotag") {
             GeoTagView()
+                .tint(Theme.amber)
         }
         .defaultSize(width: 700, height: 520)
 
         Settings {
             SettingsView()
                 .environmentObject(model)
+                .tint(Theme.amber)
         }
     }
 }

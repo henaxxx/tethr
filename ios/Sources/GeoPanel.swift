@@ -1,4 +1,5 @@
 import SwiftUI
+import TethrUI
 import Network
 
 /// 位置情報の状態と設定。操作パネルに置くには項目が多いのでシートに分ける。

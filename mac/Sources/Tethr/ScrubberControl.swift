@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import TethrUI
 
 /// スクラバーのポインタ操作を受け持つ NSView。
 /// 連続的な横ドラッグ・ホイール・クリック位置を SwiftUI へ渡す。
@@ -133,25 +134,26 @@ private struct ScrubInteraction: NSViewRepresentable {
     }
 }
 
-/// 値を横一列に並べ、中央のマーカーに合わせて選ぶ。
+/// 値を横一列に並べ、中央の枠に合わせて選ぶ。
 /// 前後の値が常に見えているので「あと 2 段」といった操作が目視でできる。
 ///
 /// ドラッグ中はカメラへ書き込まず、指を離した時点で確定する。
 /// 通過した値をいちいち書き込むと PTP の往復でつっかえるため。
+///
+/// 見た目は iOS 版と同じ。帯を行の幅いっぱいに取って枠を中央に置き、名前は左端に重ねる
 struct ScrubberControl: View {
-    let title: LocalizedStringKey
+    let title: String
     let options: [String]
-    let format: (String) -> String
     @Binding var selection: String
     var enabled: Bool = true
-    /// カメラ側が値を決めていて変更できない状態（A の shutterspeed など）
-    var locked: Bool = false
 
     @State private var dragOffset: CGFloat = 0
     @State private var hovered = false
 
-    private let itemWidth: CGFloat = 58
-    private let stripHeight: CGFloat = 34
+    private let itemWidth: CGFloat = 56
+    private let stripHeight: CGFloat = 36
+    /// 名前が載る左端の幅。値はこの下を通るあいだ消える
+    private let labelWidth: CGFloat = 74
 
     private var baseIndex: Int { options.firstIndex(of: selection) ?? 0 }
 
@@ -163,56 +165,40 @@ struct ScrubberControl: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                strip(width: geo.size.width)
+                    .mask(edgeFade(width: geo.size.width))
+
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(enabled ? Theme.amber : Theme.dimmer, lineWidth: hovered ? 2 : 1.5)
+                    .frame(width: itemWidth - 6, height: stripHeight - 8)
+                    .frame(maxWidth: .infinity)
+                    .animation(.easeOut(duration: 0.12), value: hovered)
+
                 Text(title)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-                if locked {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 8))
-                        .foregroundStyle(.tertiary)
-                        .help("このモードではカメラが自動で決めます")
-                }
-                Spacer()
-                Text(options.isEmpty ? "—" : format(options[displayIndex]))
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(enabled ? .primary : .tertiary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(enabled ? Theme.dim : Theme.dimmer)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(width: labelWidth - 14, alignment: .leading)
+                    .padding(.leading, 10)
             }
-
-            GeometryReader { geo in
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.separator, lineWidth: 1))
-
-                    strip(width: geo.size.width)
-                        .mask(edgeFade)
-
-                    // 中央マーカー
-                    RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(Color.accentColor.opacity(enabled ? (hovered ? 1 : 0.75) : 0.3),
-                                      lineWidth: hovered ? 2 : 1.5)
-                        .frame(width: itemWidth - 10, height: stripHeight - 8)
-                        .animation(.easeOut(duration: 0.12), value: hovered)
-                }
-                .frame(width: geo.size.width, height: stripHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    enabled
-                    ? ScrubInteraction(
-                        onDrag: { drag($0) },
-                        onRelease: { commit() },
-                        onStep: { step($0) },
-                        onClick: { jump(to: $0, width: geo.size.width) },
-                        onHover: { hovered = $0 })
-                    : nil
-                )
-            }
-            .frame(height: stripHeight)
+            .frame(width: geo.size.width, height: stripHeight)
+            .clipped()
+            .overlay(
+                enabled
+                ? ScrubInteraction(
+                    onDrag: { drag($0) },
+                    onRelease: { commit() },
+                    onStep: { step($0) },
+                    onClick: { jump(to: $0, width: geo.size.width) },
+                    onHover: { hovered = $0 })
+                : nil
+            )
         }
-        .opacity(enabled ? 1 : 0.5)
+        .frame(height: stripHeight)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 9))
         .help("ドラッグ・ホイール・矢印キーで選択")
     }
 
@@ -221,13 +207,12 @@ struct ScrubberControl: View {
     private func strip(width: CGFloat) -> some View {
         HStack(spacing: 0) {
             ForEach(Array(options.enumerated()), id: \.offset) { i, option in
-                Text(format(option))
-                    .font(.system(size: i == displayIndex ? 13 : 11,
+                Text(option)
+                    .font(.system(size: i == displayIndex ? 14 : 12,
                                   weight: i == displayIndex ? .semibold : .regular,
                                   design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(i == displayIndex ? AnyShapeStyle(Color.accentColor)
-                                                       : AnyShapeStyle(.secondary))
+                    .foregroundStyle(i == displayIndex && enabled ? Theme.amber : Theme.dim)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .frame(width: itemWidth)
@@ -241,12 +226,15 @@ struct ScrubberControl: View {
         .animation(.easeOut(duration: 0.12), value: baseIndex)
     }
 
-    private var edgeFade: some View {
-        LinearGradient(
+    /// 左は名前の下で消し、右は端でぼかす
+    private func edgeFade(width: CGFloat) -> some View {
+        let w = max(width, labelWidth + 80)
+        return LinearGradient(
             stops: [
                 .init(color: .clear, location: 0),
-                .init(color: .black, location: 0.16),
-                .init(color: .black, location: 0.84),
+                .init(color: .clear, location: (labelWidth - 6) / w),
+                .init(color: .black, location: (labelWidth + 30) / w),
+                .init(color: .black, location: 1 - 50 / w),
                 .init(color: .clear, location: 1),
             ],
             startPoint: .leading, endPoint: .trailing

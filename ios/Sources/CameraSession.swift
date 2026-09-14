@@ -1,6 +1,7 @@
 import Foundation
 import ImageCaptureCore
 import TethrKit
+import TethrUI
 import UIKit
 import Photos
 import CoreLocation
@@ -1179,14 +1180,7 @@ extension CameraSession {
     }
 
     /// 起動引数 -demoMode=M のように撮影モードを選べる
-    private static var demoStartMode: Int64 {
-        switch demoArgument("demoMode") {
-        case "M": return 1
-        case "P": return 2
-        case "S": return 4
-        default: return 3
-        }
-    }
+    private static var demoStartMode: Int64 { DemoCamera.mode(named: demoArgument("demoMode")) }
 
     func loadDemo() {
         demo = true
@@ -1194,11 +1188,7 @@ extension CameraSession {
         state = .connected("D300")
         catalogReady = true
         catalogProgress = 100
-        applyDemoValues([
-            .exposureProgram: Self.demoStartMode,
-            .nikonExposureTime: Self.demoShutter(numerator: 1, denominator: 15),
-            .fNumber: 450, .iso: 400, .exposureBias: -333, .whiteBalance: 6, .batteryLevel: 60,
-        ])
+        applyDemoValues(DemoCamera.startValues(mode: Self.demoStartMode))
         let now = Date()
         let here = CLLocation(latitude: 35.6812, longitude: 139.7671)
         liveShots = (0..<3).map { i in
@@ -1282,66 +1272,12 @@ extension CameraSession {
         return url
     }
 
-    /// 撮影モードに応じて、カメラ任せの値と露出計を D300 らしく動かす
+    /// 撮影モードに応じて、カメラ任せの値と露出計を D300 らしく動かす（規則は Mac と共通の DemoCamera）
     private func applyDemoValues(_ input: [PTP.Prop: Int64]) {
-        var v = input
-        let mode = v[.exposureProgram] ?? 3
-        let shutterChoices = Self.demoShutterChoices
-        let apertureChoices: [Int64] = [350, 400, 450, 500, 560, 630, 710, 800, 900, 1000, 1100, 1300, 1400, 1600, 1800, 2000, 2200]
-
-        func seconds(_ raw: Int64) -> Double { Double(raw >> 16) / Double(raw & 0xFFFF) }
-        func cameraEV(_ shutter: Int64, _ aperture: Int64) -> Double {
-            let n = Double(aperture) / 100
-            return log2(n * n / seconds(shutter))
-        }
-        // 室内の明るさ。ISO と露出補正を織り込んだ、適正になるカメラ側の EV
-        let target = 6.3 + log2(Double(v[.iso] ?? 400) / 100) - Double(v[.exposureBias] ?? 0) / 1000
-        func nearest(_ choices: [Int64], _ ev: (Int64) -> Double) -> Int64 {
-            choices.min { abs(ev($0) - target) < abs(ev($1) - target) } ?? choices[0]
-        }
-        switch mode {
-        case 2:
-            v[.fNumber] = 560
-            v[.nikonExposureTime] = nearest(shutterChoices) { cameraEV($0, 560) }
-        case 3:
-            v[.nikonExposureTime] = nearest(shutterChoices) { cameraEV($0, v[.fNumber] ?? 450) }
-        case 4:
-            v[.fNumber] = nearest(apertureChoices) { cameraEV(v[.nikonExposureTime] ?? 0x1000F, $0) }
-        default:
-            break
-        }
-        let shutter = v[.nikonExposureTime] ?? 0x1000F
-        let aperture = v[.fNumber] ?? 450
-        let deviation = target - cameraEV(shutter, aperture)
-        lightMeter = mode == 1 ? max(-3, min(3, (deviation * 6).rounded() / 6)) : nil
-
-        func desc(_ prop: PTP.Prop, _ type: PTP.DataType, _ choices: [Int64], writable: Bool = true) -> PropDesc {
-            PropDesc(code: prop, dataType: type, writable: writable, current: v[prop] ?? choices[0], choices: choices)
-        }
-        props = [
-            .exposureProgram: desc(.exposureProgram, .uint16, [1, 2, 3, 4]),
-            .nikonExposureTime: desc(.nikonExposureTime, .uint32, shutterChoices, writable: mode == 1 || mode == 4),
-            .fNumber: desc(.fNumber, .uint16, apertureChoices, writable: mode == 1 || mode == 3),
-            .iso: desc(.iso, .uint16, [200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200]),
-            .exposureBias: desc(.exposureBias, .int16, (-15...15).map { Int64((Double($0) * 1000 / 3).rounded()) }),
-            .whiteBalance: desc(.whiteBalance, .uint16, [2, 4, 5, 6, 7, 0x8010, 0x8011, 0x8012, 0x8013]),
-            .batteryLevel: desc(.batteryLevel, .uint8, [], writable: false),
-        ]
+        let demo = DemoCamera.apply(input)
+        lightMeter = demo.lightMeter
+        props = demo.props
     }
-
-    private static func demoShutter(numerator: Int64, denominator: Int64) -> Int64 {
-        numerator << 16 | denominator
-    }
-
-    /// D300 の 1/3 段の並び。Nikon 独自の分数（上位が分子、下位が分母）
-    private static let demoShutterChoices: [Int64] = {
-        let fast: [Int64] = [8000, 6400, 5000, 4000, 3200, 2500, 2000, 1600, 1250, 1000, 800, 640, 500, 400, 320,
-                             250, 200, 160, 125, 100, 80, 60, 50, 40, 30, 25, 20, 15, 13, 10, 8, 6, 5, 4, 3]
-        let slow: [(Int64, Int64)] = [(10, 25), (1, 2), (10, 16), (10, 13), (1, 1), (13, 10), (16, 10), (2, 1),
-                                      (25, 10), (3, 1), (4, 1), (5, 1), (6, 1), (8, 1), (10, 1), (13, 1), (15, 1),
-                                      (20, 1), (25, 1), (30, 1)]
-        return fast.map { demoShutter(numerator: 1, denominator: $0) } + slow.map { demoShutter(numerator: $0.0, denominator: $0.1) }
-    }()
 }
 
 /// デモ用の写真。空と山と太陽だけの、色の違う風景
@@ -1361,41 +1297,9 @@ enum DemoImage {
         return sideways.applyingCameraOrientation(6)
     }
 
+    /// 絵そのものは Mac と共通の DemoLandscape
     static func make(seed: Int, portrait: Bool, sunShift: Double = 0) -> UIImage {
-        let size = portrait ? CGSize(width: 800, height: 1200) : CGSize(width: 1200, height: 800)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
-            let cg = ctx.cgContext
-            let hue = CGFloat((seed * 37) % 100) / 100
-            let sky = [UIColor(hue: hue, saturation: 0.45, brightness: 0.95, alpha: 1).cgColor,
-                       UIColor(hue: (hue + 0.08).truncatingRemainder(dividingBy: 1), saturation: 0.55, brightness: 0.55, alpha: 1).cgColor]
-            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: sky as CFArray, locations: [0, 1])!
-            cg.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
-
-            UIColor(white: 1, alpha: 0.85).setFill()
-            let sun = size.width * 0.09
-            let sunX = (0.2 + 0.5 * CGFloat(seed % 3) / 3 + 0.3 * CGFloat(sunShift)).truncatingRemainder(dividingBy: 0.9)
-            cg.fillEllipse(in: CGRect(x: size.width * sunX, y: size.height * 0.2, width: sun, height: sun))
-
-            for layer in 0..<3 {
-                let base = size.height * (0.55 + CGFloat(layer) * 0.12)
-                let path = UIBezierPath()
-                path.move(to: CGPoint(x: 0, y: size.height))
-                path.addLine(to: CGPoint(x: 0, y: base))
-                let peaks = 4 + (seed + layer) % 3
-                for p in 0...peaks {
-                    let x = size.width * CGFloat(p) / CGFloat(peaks)
-                    let lift = CGFloat(((seed + 3) * (p + 7) * (layer + 5)) % 23) / 23 * size.height * 0.14
-                    path.addLine(to: CGPoint(x: x, y: base - lift))
-                }
-                path.addLine(to: CGPoint(x: size.width, y: size.height))
-                path.close()
-                UIColor(hue: (hue + 0.5).truncatingRemainder(dividingBy: 1), saturation: 0.35,
-                        brightness: 0.42 - CGFloat(layer) * 0.12, alpha: 1).setFill()
-                path.fill()
-            }
-        }
+        DemoLandscape.make(seed: seed, portrait: portrait, sunShift: sunShift).map { UIImage(cgImage: $0) } ?? UIImage()
     }
 }
 #endif

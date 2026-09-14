@@ -3,6 +3,11 @@ import Combine
 import SwiftUI
 import AppKit
 import TethrKit
+#if DEBUG
+import TethrUI
+import ImageIO
+import UniformTypeIdentifiers
+#endif
 
 enum AFState: Equatable {
     case idle
@@ -88,6 +93,10 @@ final class SessionModel: ObservableObject {
     private var shotNotifications = 0
     /// 設定を書き込んでいる数。その間はコマ取りと問い合わせを休む
     private var writing = 0
+    #if DEBUG
+    /// カメラ無しで画面を確かめるための、つながったふり（起動引数 -demo）
+    private(set) var demo = false
+    #endif
     private let thumbQueue = DispatchQueue(label: "app.tethr.thumb", qos: .userInitiated, attributes: .concurrent)
     private let frameQueue = DispatchQueue(label: "app.tethr.liveframe", qos: .userInitiated)
 
@@ -144,6 +153,7 @@ final class SessionModel: ObservableObject {
                 self.card.open(first.id)
             }
         }
+        if CommandLine.arguments.contains("-demo") { loadDemo() }
         #endif
         link.onDownloadFailed = { [weak self] name, reason in
             guard let self else { return }
@@ -277,6 +287,9 @@ final class SessionModel: ObservableObject {
     // MARK: 接続
 
     func connect() {
+        #if DEBUG
+        if demo { return }
+        #endif
         lastError = nil
         failedTransfers = []
         applyDestination()
@@ -409,6 +422,14 @@ final class SessionModel: ObservableObject {
     }
 
     func setProp(_ prop: PTP.Prop, to value: Int64) {
+        #if DEBUG
+        if demo {
+            var values = props.mapValues(\.current)
+            values[prop] = value
+            applyDemoValues(values)
+            return
+        }
+        #endif
         guard let camera, let desc = props[prop], value != desc.current else { return }
         writing += 1
         Task {
@@ -516,6 +537,9 @@ final class SessionModel: ObservableObject {
     }
 
     func shoot() {
+        #if DEBUG
+        if demo { return demoShoot() }
+        #endif
         guard isConnected, !busy, let camera else { return }
         busy = true
         Task {
@@ -548,6 +572,9 @@ final class SessionModel: ObservableObject {
     /// D300 はミラーアップしてシャッターを開いたまま保持するため、
     /// 点けっぱなしはセンサーの発熱とバッテリー消費につながる。
     func toggleLiveView() {
+        #if DEBUG
+        if demo { return }
+        #endif
         guard isConnected else { return }
         guard let liveView else {
             lastError = String(localized: "この機種ではライブビューを使えません。")
@@ -638,6 +665,13 @@ final class SessionModel: ObservableObject {
 
     /// AF を走らせる。シャッター半押しに相当。
     func autofocus() {
+        #if DEBUG
+        if demo {
+            afState = .succeeded
+            Task { try? await Task.sleep(for: .seconds(2)); afState = .idle }
+            return
+        }
+        #endif
         guard isConnected, afState != .running, let camera else { return }
         afState = .running
         Task {
@@ -708,3 +742,78 @@ final class SessionModel: ObservableObject {
         }
     }
 }
+
+#if DEBUG
+// MARK: - デモ
+
+/// 画面を撮るとき用。カメラ無しで D300 につながったふりをする（iOS 版の -demo と同じ絵と設定）。
+/// private(set) の状態を書き換えるので、このファイルに置く
+extension SessionModel {
+
+    private static func demoArgument(_ name: String) -> Substring? {
+        CommandLine.arguments.first { $0.hasPrefix("-\(name)=") }?.dropFirst(name.count + 2)
+    }
+
+    func loadDemo() {
+        demo = true
+        PropFormat.vendor = PropFormat.vendorNikon
+        state = .connected("D300")
+        bufferRemaining = 19
+        applyDemoValues(DemoCamera.startValues(mode: DemoCamera.mode(named: Self.demoArgument("demoMode"))))
+        // 撮ったカットはファイルとして届くので、デモの絵を JPEG に書いて普段と同じ経路で並べる
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("TethrDemo", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let now = Date()
+        for i in (0..<6).reversed() {
+            let url = dir.appendingPathComponent(String(format: "_DSC%04d.NEF", 5182 - i))
+            writeDemoShot(to: url, seed: i, portrait: i == 1 || i == 4, taken: now.addingTimeInterval(Double(-i * 45)))
+            fileSaved(url)
+        }
+        // 窓が手前に無いと、琥珀色の部品が灰色で描かれる
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.activate() }
+    }
+
+    private func applyDemoValues(_ input: [PTP.Prop: Int64]) {
+        let demo = DemoCamera.apply(input, bodyInfo: true)
+        props = demo.props
+        lightMeter = demo.lightMeter
+    }
+
+    private func demoShoot() {
+        guard !busy else { return }
+        busy = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(1200))
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("TethrDemo", isDirectory: true)
+            let number = 5183 + shots.count
+            let url = dir.appendingPathComponent(String(format: "_DSC%04d.NEF", number))
+            writeDemoShot(to: url, seed: number, portrait: number % 4 == 0, taken: Date())
+            fileSaved(url)
+            busy = false
+        }
+    }
+
+    /// デモの絵を、撮影設定の EXIF 付きの JPEG として書く（中身は JPEG でも、名前は NEF にして一覧を本物らしくする）
+    private func writeDemoShot(to url: URL, seed: Int, portrait: Bool, taken: Date) {
+        guard let image = DemoLandscape.make(seed: seed, portrait: portrait, scale: 3),
+              let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { return }
+        let format = DateFormatter()
+        format.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        let exposure = props[.nikonExposureTime].map { Double($0.current >> 16) / Double(max($0.current & 0xFFFF, 1)) } ?? 1 / 15
+        let exif: [CFString: Any] = [
+            kCGImagePropertyExifExposureTime: exposure,
+            kCGImagePropertyExifFNumber: Double(props[.fNumber]?.current ?? 450) / 100,
+            kCGImagePropertyExifISOSpeedRatings: [props[.iso]?.current ?? 400],
+            kCGImagePropertyExifDateTimeOriginal: format.string(from: taken),
+        ]
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.9,
+            kCGImagePropertyExifDictionary: exif,
+        ]
+        CGImageDestinationAddImage(destination, image, options as CFDictionary)
+        CGImageDestinationFinalize(destination)
+    }
+}
+#endif

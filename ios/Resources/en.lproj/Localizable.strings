@@ -28,7 +28,7 @@
 "シャッター" = "Shutter";
 "絞り" = "Aperture";
 "モード" = "Mode";
-"露出補正" = "Exposure comp.";
+"露出補正" = "Exp. comp.";
 "バッテリー" = "Battery";
 "画像サイズ" = "Image size";
 "撮影できませんでした: %@" = "Could not take the shot: %@";

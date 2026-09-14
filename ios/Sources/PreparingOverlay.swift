@@ -45,7 +45,7 @@ struct PreparingOverlay: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Color(uiColor: .systemBackground))
+        .background(Theme.background)
     }
 }
 

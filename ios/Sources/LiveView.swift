@@ -52,6 +52,9 @@ final class LiveViewController: ObservableObject {
     func start() async {
         guard state == .off, let s = session, s.isConnected, s.catalogReady, !s.pocketed else { return }
         state = .starting
+        #if DEBUG
+        if s.demo { return await startDemo() }
+        #endif
         stopRequested = false
         await logWithState("ライブビュー: 開始")
         let key = "liveViewNeedsSDRAM.\(s.cameraIdentifier ?? "?")"
@@ -360,6 +363,29 @@ final class LiveViewController: ObservableObject {
         }
     }
 
+    #if DEBUG
+    /// デモ（起動引数 -demo）では、太陽が動くだけの映像を流す
+    private func startDemo() async {
+        let frames = (0..<24).map { i -> UIImage in
+            DemoImage.make(seed: 4, portrait: false, sunShift: Double(i) / 24)
+                .preparingThumbnail(of: CGSize(width: 640, height: 426)) ?? UIImage()
+        }
+        try? await Task.sleep(for: .milliseconds(600))
+        guard !stopRequested else { return finishStopping() }
+        state = .on
+        Haptics.success()
+        loop = Task { [weak self] in
+            var i = 0
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.suspended { self.feed.show(frames[i % frames.count]) }
+                i += 1
+                try? await Task.sleep(for: .milliseconds(37))
+            }
+        }
+    }
+    #endif
+
     // MARK: 失敗の説明
 
     enum LiveViewFailure: Error { case noFrames, stopped }
@@ -467,17 +493,15 @@ final class LiveFeed: ObservableObject {
 struct PreviewSwitcher: View {
     @EnvironmentObject var session: CameraSession
     @ObservedObject var live: LiveViewController
-    @State private var fullScreen = false
+    @Binding var fullScreen: Bool
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        Group {
             if live.state == .off {
                 ShotPreviewArea()
             } else {
-                LivePane(feed: live.feed, stopping: live.state == .stopping, shooting: live.suspended) { fullScreen = true }
+                LivePane(feed: live.feed, stopping: live.state == .stopping, shooting: live.suspended)
             }
-            LiveViewToggle(live: live)
-                .padding(10)
         }
         .fullScreenCover(isPresented: $fullScreen) {
             LiveFullScreen(live: live, feed: live.feed).environmentObject(session)
@@ -501,32 +525,30 @@ struct LiveViewToggle: View {
                 Haptics.toggle()
                 live.toggle()
             } label: {
-                HStack(spacing: 5) {
+                Group {
                     switch live.state {
                     case .starting, .stopping:
-                        ProgressView().controlSize(.mini)
+                        ProgressView().controlSize(.small).tint(Theme.dim)
                     case .on:
-                        Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold))
+                        Image(systemName: "video.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(Theme.onAmber)
                     case .off:
-                        Image(systemName: "video.fill").font(.system(size: 10, weight: .semibold))
-                    }
-                    Text(label(ready: ready))
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .foregroundStyle(live.state == .on ? Color.white : Color.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background {
-                    if live.state == .on {
-                        Capsule().fill(Color.red.opacity(0.85))
-                    } else {
-                        Capsule().fill(.ultraThinMaterial)
+                        Image(systemName: "video")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Theme.text)
                     }
                 }
+                .frame(width: 36, height: 36)
+                .glassCircle(tint: live.state == .on ? Theme.amber : nil)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(live.state == .off && !ready || live.state == .starting || live.state == .stopping)
-            .opacity(live.state == .off && !ready ? 0.5 : 1)
+            .opacity(live.state == .off && !ready ? 0.4 : 1)
+            .accessibilityLabel(Text("ライブビュー"))
+            .accessibilityValue(Text(label(ready: ready)))
         }
     }
 
@@ -540,46 +562,72 @@ struct LiveViewToggle: View {
     }
 }
 
-/// 上のプレビュー欄に出す映像
+/// 上のプレビュー欄に出す映像。写真と同じく、上には何も重ねない
 struct LivePane: View {
     @ObservedObject var feed: LiveFeed
     let stopping: Bool
     /// 撮影のために止めている間は最後のコマを暗くして出す
     let shooting: Bool
-    let onFullScreen: () -> Void
 
     var body: some View {
         ZStack {
-            Color.black
+            Theme.background
             if let frame = feed.frame {
                 Image(uiImage: frame)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .opacity(stopping || shooting ? 0.4 : 1)
             } else {
-                ProgressView().tint(.white)
+                ProgressView().tint(Theme.dim)
             }
-            if shooting { ShootingBadge() }
-            VStack {
-                HStack {
-                    LiveBadge(fps: feed.fps)
-                    Spacer()
-                }
-                Spacer()
-                HStack {
-                    Spacer()
-                    Button(action: onFullScreen) {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(10)
         }
+    }
+}
+
+/// 写真の下の段に出す、ライブビューの状態。映像は毎秒 27 回変わるので、この部分だけが描き直される
+struct LiveStatus: View {
+    @ObservedObject var feed: LiveFeed
+    let state: LiveViewController.State
+    let shooting: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(Theme.live).frame(width: 7, height: 7)
+            Text("LIVE").font(.system(size: 12, weight: .bold))
+            Group {
+                if shooting {
+                    Text("撮影中")
+                } else if state == .starting {
+                    Text("開始中")
+                } else if state == .stopping {
+                    Text("停止中")
+                } else if feed.fps > 0 {
+                    Text(String(format: "%.0f fps", feed.fps)).monospacedDigit()
+                }
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.dim)
+        }
+    }
+}
+
+struct LiveBadge: View {
+    let fps: Double
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(Theme.live).frame(width: 7, height: 7)
+            Text("LIVE").font(.system(size: 11, weight: .bold))
+            if fps > 0 {
+                Text(String(format: "%.0f fps", fps))
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.black.opacity(0.5), in: Capsule())
     }
 }
 
@@ -594,26 +642,6 @@ struct ShootingBadge: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(.black.opacity(0.5), in: Capsule())
-    }
-}
-
-struct LiveBadge: View {
-    let fps: Double
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Circle().fill(Color.red).frame(width: 7, height: 7)
-            Text("LIVE").font(.system(size: 10, weight: .bold))
-            if fps > 0 {
-                Text(String(format: "%.0f fps", fps))
-                    .font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.black.opacity(0.45), in: Capsule())
     }
 }
 
@@ -657,30 +685,19 @@ struct LiveFullScreen: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(.ultraThinMaterial, in: Circle())
+                            .frame(width: 44, height: 44)
+                            .glassCircle()
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(Text("閉じる"))
                     Spacer()
                     LiveBadge(fps: feed.fps)
                 }
                 Spacer()
-                Button {
+                ShutterButton(size: 72, busy: session.busy, enabled: true) {
                     Haptics.shutter()
                     Task { await session.capture() }
-                } label: {
-                    Group {
-                        if session.busy {
-                            ProgressView().tint(.white)
-                        } else {
-                            Image(systemName: "camera.shutter.button").font(.system(size: 26))
-                        }
-                    }
-                    .frame(width: 62, height: 62)
                 }
-                .buttonStyle(.borderedProminent)
-                .clipShape(Circle())
-                .disabled(session.busy)
             }
             .padding(.horizontal, 46)
             .padding(.vertical, 22)

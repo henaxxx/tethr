@@ -2,9 +2,14 @@ import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
 
+/// 撮影の画面。上から、カメラの名前 → 写真 → 写真の情報 → コマの一覧 → 露出 → シャッター。
+///
+/// 写真の上には何も重ねない（構図を見るのが一番の用事なので）。
+/// 露出の操作は撮影モードで入れ替え、シャッターは親指の届く下の中央に置く
 struct ContentView: View {
     @EnvironmentObject var session: CameraSession
     @State private var reviewing = false
+    @State private var liveFullScreen = false
     /// 起動した最初の画面から待ち画面を出しておく。通常の画面が一瞬見えてから切り替わらないように
     @State private var showPreparing = true
     @State private var preparingReveal: Date?
@@ -13,17 +18,15 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            StatusHeader()
-            Divider()
-            PreviewArea()
-            Divider()
-            SourcePicker()
-            Filmstrip()
-                .frame(height: 92)
-            Divider()
+            TopBar()
+            PreviewSwitcher(live: session.live, fullScreen: $liveFullScreen)
+            PreviewInfoRow(live: session.live, openLiveFullScreen: { liveFullScreen = true })
+            ShotStrip()
             ControlPanel()
         }
-        .background(Color(uiColor: .systemBackground))
+        .background(Theme.background)
+        .foregroundStyle(Theme.text)
+        .tint(Theme.amber)
         .alert("エラー", isPresented: Binding(
             get: { session.lastError != nil },
             set: { if !$0 { session.lastError = nil } }
@@ -63,6 +66,12 @@ struct ContentView: View {
             updatePreparingOverlay()
         }
         .task {
+            #if DEBUG
+            if CameraSession.demoRequested {
+                session.loadDemo()
+                return
+            }
+            #endif
             if case .idle = session.state { session.start() }
         }
     }
@@ -108,48 +117,119 @@ extension ContentView {
 
 // MARK: - 上部
 
-struct StatusHeader: View {
+/// カメラの名前と、位置情報・電池。
+/// 接続解除はめったに使わないので、名前を押したときのメニューに入れる
+struct TopBar: View {
     @EnvironmentObject var session: CameraSession
+    @State private var showGeoPanel = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            if session.preparing {
-                // 固まっているのではなく待っていると分かるように回しておく
-                ProgressView().controlSize(.mini)
-            } else {
-                Circle().fill(color).frame(width: 8, height: 8)
-            }
-            Text(text).font(.system(size: 12, weight: .medium)).lineLimit(1)
-            ConnectionButton()
-            Spacer(minLength: 6)
-            if session.isConnected {
-                // M 以外では振れないので、場所は残したまま透明にする（ヘッダーの他の表示をずらさない）
-                LightMeterView(value: session.lightMeter)
-                    .opacity(session.lightMeterMeaningful ? 1 : 0)
-                    .animation(.easeInOut(duration: 0.4), value: session.lightMeterMeaningful)
-                    .accessibilityHidden(!session.lightMeterMeaningful)
-            }
-            Spacer(minLength: 6)
-            if let drift = session.clockCorrection, abs(drift) > 2 {
-                Image(systemName: "clock.arrow.trianglehead.counterclockwise.rotate.90")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .help("カメラの時計を \(Int(abs(drift))) 秒ぶん合わせました")
+        HStack(spacing: 4) {
+            CameraMenu()
+            Spacer(minLength: 8)
+            IconButton(systemName: session.geotagging ? "location.fill" : "location.slash",
+                       tint: session.geotagging ? Theme.amber : Theme.dim,
+                       filled: false,
+                       label: Text("位置情報")) {
+                showGeoPanel = true
             }
             if let battery = session.props[.batteryLevel] {
                 BatteryIndicator(level: battery.current)
+                    .padding(.trailing, 6)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
+        .frame(height: 48)
+        .sheet(isPresented: $showGeoPanel) {
+            GeoPanel().environmentObject(session)
+        }
+    }
+}
+
+/// 機種名。つながっていれば押すとメニュー（時計合わせの結果・電池・接続解除）が開く
+struct CameraMenu: View {
+    @EnvironmentObject var session: CameraSession
+
+    var body: some View {
+        if session.preparing {
+            status(spinner: true)
+        } else if session.userDisconnected, case .idle = session.state {
+            HStack(spacing: 10) {
+                Text(session.deviceName ?? String(localized: "カメラ"))
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Theme.dim)
+                Button {
+                    Haptics.toggle()
+                    session.reconnect()
+                } label: {
+                    Text("接続")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.onAmber)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Theme.amber, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        } else if case .connected(let name) = session.state {
+            Menu {
+                if let drift = session.clockCorrection, abs(drift) > 2 {
+                    Label("カメラの時計を \(Int(abs(drift))) 秒ぶん合わせました",
+                          systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                }
+                if let battery = session.props[.batteryLevel] {
+                    Label {
+                        Text("カメラの電池") + Text(" ") + Text(BatteryIndicator.rangeText(battery.current))
+                    } icon: {
+                        Image(systemName: BatteryIndicator.symbol(battery.current))
+                    }
+                }
+                Section {
+                    Button {
+                        Haptics.toggle()
+                        session.disconnect()
+                    } label: {
+                        Label("接続解除", systemImage: "eject")
+                    }
+                    .disabled(session.busy)
+                }
+            } label: {
+                HStack(spacing: 7) {
+                    Circle().fill(Theme.amber).frame(width: 7, height: 7)
+                    Text(name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.text)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Theme.dim)
+                }
+                .frame(height: 44)
+                .contentShape(Rectangle())
+            }
+        } else {
+            status(spinner: session.state == .searching || { if case .connecting = session.state { return true }; return false }())
+        }
     }
 
-    private var color: Color {
+    private func status(spinner: Bool) -> some View {
+        HStack(spacing: 8) {
+            if spinner {
+                ProgressView().controlSize(.mini).tint(Theme.dim)
+            } else {
+                Circle().fill(dotColor).frame(width: 7, height: 7)
+            }
+            Text(text)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.dim)
+                .lineLimit(1)
+        }
+    }
+
+    private var dotColor: Color {
         switch session.state {
-        case .connected: return .green
-        case .connecting, .searching: return .orange
-        case .failed, .unauthorized: return .red
-        case .idle: return .secondary
+        case .failed, .unauthorized: return Theme.danger
+        default: return Theme.dimmer
         }
     }
 
@@ -162,9 +242,6 @@ struct StatusHeader: View {
                 return String(localized: "カードを確認中（\(count) 件・約 \(seconds) 秒）")
             }
             return String(localized: "カードを確認中…")
-        }
-        if session.userDisconnected, case .idle = session.state {
-            return String(localized: "\(session.deviceName ?? String(localized: "カメラ"))・未接続")
         }
         switch session.state {
         case .idle: return String(localized: "未接続")
@@ -185,133 +262,24 @@ struct BatteryIndicator: View {
     let level: Int64
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 13))
-            .foregroundStyle(level <= 20 ? Color.red : Color.secondary)
+        Image(systemName: Self.symbol(level))
+            .font(.system(size: 15))
+            .foregroundStyle(level <= 20 ? Theme.danger : Theme.dim)
             .accessibilityLabel(Text("カメラの電池"))
-            .accessibilityValue(Text(level >= 100 ? String(localized: "満充電") : String(localized: "\(max(0, level - 19))〜\(level)%")))
+            .accessibilityValue(Text(Self.rangeText(level)))
     }
 
-    private var symbol: String {
+    static func rangeText(_ level: Int64) -> String {
+        level >= 100 ? String(localized: "満充電") : String(localized: "\(max(0, level - 19))〜\(level)%")
+    }
+
+    static func symbol(_ level: Int64) -> String {
         switch level {
         case 81...:   return "battery.100percent"
         case 61...80: return "battery.75percent"
         case 41...60: return "battery.50percent"
         case 1...40:  return "battery.25percent"
         default:      return "battery.0percent"
-        }
-    }
-}
-
-/// 機種名の右に置く「接続解除」「接続」。カードの確認中は命令が通らないので出さない
-struct ConnectionButton: View {
-    @EnvironmentObject var session: CameraSession
-
-    var body: some View {
-        if session.userDisconnected, case .idle = session.state {
-            pill(String(localized: "接続"), prominent: true) {
-                Haptics.toggle()
-                session.reconnect()
-            }
-        } else if session.isConnected, !session.preparing {
-            pill(String(localized: "接続解除"), prominent: false) {
-                Haptics.toggle()
-                session.disconnect()
-            }
-                .disabled(session.busy)
-        }
-    }
-
-    private func pill(_ title: String, prominent: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(prominent ? Color.white : Color.primary)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background {
-                    if prominent {
-                        Capsule().fill(Color.accentColor)
-                    } else {
-                        Capsule().fill(.quaternary)
-                    }
-                }
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
-    }
-}
-
-/// テザー撮影ぶんとカード内を切り替える。
-/// 既定はテザー。接続後に撮ったカットだけを出す（Mac 版と同じ考え方）。
-struct SourcePicker: View {
-    @EnvironmentObject var session: CameraSession
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Picker("", selection: Binding(
-                get: { session.browsingCard },
-                set: {
-                    guard $0 != session.browsingCard else { return }
-                    Haptics.select()
-                    session.browsingCard = $0
-                }
-            )) {
-                Text("テザー (\(session.liveShots.count))").tag(false)
-                Text(cardLabel).tag(true)
-            }
-            .pickerStyle(.segmented)
-            .disabled(!session.isConnected)
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 8)
-    }
-
-    private var cardLabel: String {
-        session.catalogReady
-            ? String(localized: "カード (\(session.cardShots.count))")
-            : String(localized: "カード 読込中 \(session.catalogProgress)%")
-    }
-}
-
-/// カメラの露出計をそのまま可視化する。
-/// 中央が適正。Nikon の慣習に合わせ、左が＋（露出過多）、右が−（露出不足）。
-/// Canon とは左右が逆になる。
-struct LightMeterView: View {
-    let value: Double?
-
-    var body: some View {
-        let ev = max(-3, min(3, value ?? 0))
-        HStack(spacing: 5) {
-            Text("＋").font(.system(size: 9)).foregroundStyle(.tertiary)
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    HStack(spacing: 0) {
-                        ForEach(0..<13) { i in
-                            Rectangle()
-                                .fill(Color.secondary.opacity(i % 2 == 0 ? 0.5 : 0.22))
-                                .frame(width: 1, height: i == 6 ? 11 : (i % 2 == 0 ? 7 : 4))
-                            if i < 12 { Spacer(minLength: 0) }
-                        }
-                    }
-                    .frame(height: 11)
-
-                    if value != nil {
-                        Capsule()
-                            .fill(abs(ev) < 0.2 ? Color.green : Color.orange)
-                            .frame(width: 3, height: 13)
-                            .offset(x: (geo.size.width - 3) * ((3 - ev) / 6))
-                            .animation(.easeOut(duration: 0.15), value: ev)
-                    }
-                }
-                .frame(height: 13)
-            }
-            .frame(width: 116, height: 13)
-            Text("−").font(.system(size: 9)).foregroundStyle(.tertiary)
-            Text(value.map { String(format: "%+.1f", $0) } ?? "—")
-                .font(.system(size: 10).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 30, alignment: .leading)
         }
     }
 }
@@ -330,24 +298,13 @@ extension EnvironmentValues {
     }
 }
 
-/// 上のプレビュー欄。ライブビュー中は映像に置き換える（LiveView.swift）
-struct PreviewArea: View {
-    @EnvironmentObject var session: CameraSession
-
-    var body: some View {
-        PreviewSwitcher(live: session.live)
-    }
-}
-
-/// 選んだカットの表示
+/// 選んだカットの表示。写真の周りは画面の地と同じ色にして、余白が帯に見えないようにする
 struct ShotPreviewArea: View {
     @EnvironmentObject var session: CameraSession
-    @Environment(\.openReview) private var openReview
     @State private var zoom: CGFloat = 1
     @State private var offset: CGSize = .zero
     @State private var offsetAtStart: CGSize = .zero
     @State private var fullImage: UIImage?
-    @State private var downloading = false
 
     private var shot: Shot? {
         session.shots.first { $0.id == session.selection } ?? session.shots.first
@@ -356,7 +313,7 @@ struct ShotPreviewArea: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                Color(uiColor: .secondarySystemBackground).opacity(0.4)
+                Theme.background
 
                 if let shot {
                     if let image = fullImage ?? shot.preview ?? shot.thumbnail {
@@ -371,49 +328,19 @@ struct ShotPreviewArea: View {
                             .simultaneousGesture(pan)
                             .onTapGesture(count: 2) { toggleZoom() }
                     } else {
-                        ProgressView()
-                    }
-
-                    VStack {
-                        Spacer()
-                        HStack(spacing: 10) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(shot.name).font(.system(size: 12, weight: .medium))
-                                Text(shot.sizeText).font(.system(size: 10)).foregroundStyle(.secondary)
-                            }
-                            Button { openReview() } label: {
-                                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                    .font(.system(size: 14, weight: .medium))
-                            }
-                            .padding(.leading, 4)
-                            Spacer()
-                            if downloading {
-                                ProgressView().controlSize(.small)
-                            } else if shot.localURL == nil {
-                                Button("端末に取り込む") { download(shot) }
-                                    .font(.system(size: 12, weight: .medium))
-                                    .buttonStyle(.borderedProminent)
-                                    .controlSize(.small)
-                            } else {
-                                Label(shot.savedToPhotos ? "写真アプリに保存済み" : "取り込み済み",
-                                      systemImage: "checkmark.circle.fill")
-                                    .font(.system(size: 11)).foregroundStyle(.green)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(.ultraThinMaterial)
+                        ProgressView().tint(Theme.dim)
                     }
                 } else {
-                    VStack(spacing: 8) {
-                        Image(systemName: "camera.macro")
+                    VStack(spacing: 10) {
+                        Image(systemName: "camera.aperture")
                             .font(.system(size: 34, weight: .ultraLight))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Theme.dimmer)
                         Text(emptyMessage)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 14))
+                            .foregroundStyle(Theme.dim)
                             .multilineTextAlignment(.center)
                     }
+                    .padding(.horizontal, 24)
                 }
             }
         }
@@ -423,6 +350,10 @@ struct ShotPreviewArea: View {
             fullImage = nil
             if let shot { session.requestPreview(for: shot) }
             if let url = shot?.localURL { loadFull(url) }
+        }
+        // 取り込みが済んだら、端末内のファイルから大きな絵を作り直す
+        .onChange(of: shot?.localURL) { _, url in
+            if let url { loadFull(url) }
         }
         .onAppear {
             if let shot { session.requestPreview(for: shot) }
@@ -462,91 +393,402 @@ struct ShotPreviewArea: View {
         offsetAtStart = offset
     }
 
-    private func download(_ shot: Shot) {
-        downloading = true
-        Task {
-            let url = await session.importShot(shot)
-            downloading = false
-            guard let url else { return }
-            Haptics.success()
-            loadFull(url)
-        }
-    }
-
     /// NEF に埋め込まれた JPEG から表示用の画像を作る。
     /// RAW を展開すると桁違いに遅いので、埋め込みを使う。
     private func loadFull(_ url: URL) {
-        Task.detached(priority: .userInitiated) {
-            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
-            let opts: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-                kCGImageSourceThumbnailMaxPixelSize: 2400,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-            ]
-            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return }
-            let image = UIImage(cgImage: cg)
-            await MainActor.run { self.fullImage = image }
+        Task {
+            if let image = await Preview.load(url) { fullImage = image }
         }
     }
 }
 
-// MARK: - フィルムストリップ
+/// 写真のすぐ下の段。左にファイル名（ライブビュー中は映像の状態）、右にライブビュー・全画面・取り込み
+struct PreviewInfoRow: View {
+    @EnvironmentObject var session: CameraSession
+    @Environment(\.openReview) private var openReview
+    @ObservedObject var live: LiveViewController
+    let openLiveFullScreen: () -> Void
 
-struct Filmstrip: View {
+    private var shot: Shot? {
+        session.shots.first { $0.id == session.selection } ?? session.shots.first
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            if live.state != .off {
+                LiveStatus(feed: live.feed, state: live.state, shooting: live.suspended)
+            } else if let shot {
+                HStack(spacing: 6) {
+                    Text(shot.name)
+                        .font(.system(size: 13, weight: .medium))
+                    Text(shot.sizeText)
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Theme.dim)
+                    if shot.location != nil {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.dim)
+                            .accessibilityLabel(Text("位置情報"))
+                    }
+                }
+                .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            LiveViewToggle(live: live)
+
+            if live.state != .off || shot != nil {
+                IconButton(systemName: "arrow.up.left.and.arrow.down.right", label: Text("全画面")) {
+                    live.state == .off ? openReview() : openLiveFullScreen()
+                }
+            }
+
+            if live.state == .off, let shot {
+                ImportButton(shot: shot)
+                    .padding(.leading, 4)
+            }
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 10)
+        .frame(height: 50)
+    }
+
+}
+
+/// 取り込みボタン。押すとカプセルの中が琥珀色で満ちていき、満ちきったら「保存済み」の表示に変わる。
+///
+/// 進み具合は ImageCaptureCore のダウンロードが返す Progress から取る。
+/// 数字が届かない間（届かない機種もある）は、光の帯を流して動いていることだけを伝える
+struct ImportButton: View {
+    @EnvironmentObject var session: CameraSession
+    let shot: Shot
+
+    var body: some View {
+        let progress = session.importProgress[shot.name]
+        let done = shot.localURL != nil && progress == nil
+
+        Button(action: start) {
+            HStack(spacing: 5) {
+                Image(systemName: done ? "checkmark.circle.fill" : "arrow.down.to.line")
+                    .contentTransition(.symbolEffect(.replace))
+                Text(label(progress: progress, done: done))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(progress != nil ? Theme.text : Theme.amber)
+            .padding(.horizontal, 12)
+            .frame(width: 118, height: 36)
+            .background {
+                if let progress { ImportFill(progress: progress) }
+            }
+            .glassCapsule(active: !done)
+            .frame(height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // disabled にすると済んだ表示まで薄くなるので、触れないようにだけする
+        .allowsHitTesting(progress == nil && !done)
+        .accessibilityAddTraits(done ? .isStaticText : [])
+        .animation(.snappy(duration: 0.3), value: done)
+        .animation(.snappy(duration: 0.2), value: progress == nil)
+    }
+
+    private func label(progress: Double?, done: Bool) -> String {
+        if done { return shot.savedToPhotos ? String(localized: "保存済み") : String(localized: "取り込み済み") }
+        if progress != nil { return String(localized: "取り込み中") }
+        return String(localized: "取り込む")
+    }
+
+    private func start() {
+        Task {
+            if await session.importShot(shot) != nil { Haptics.success() }
+        }
+    }
+}
+
+/// 取り込み中のカプセルの中身
+private struct ImportFill: View {
+    let progress: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                if progress > 0 {
+                    Rectangle()
+                        .fill(Theme.amber.opacity(0.45))
+                        .frame(width: geo.size.width * min(progress, 1))
+                        .animation(.easeOut(duration: 0.25), value: progress)
+                } else {
+                    // まだ数字が届いていない。光の帯を左から右へ流す
+                    TimelineView(.animation) { timeline in
+                        let t = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.1) / 1.1
+                        LinearGradient(colors: [.clear, Theme.amber.opacity(0.5), .clear],
+                                       startPoint: .leading, endPoint: .trailing)
+                            .frame(width: geo.size.width * 0.5)
+                            .offset(x: geo.size.width * (1.5 * t - 0.5))
+                    }
+                }
+            }
+        }
+        .clipShape(Capsule())
+    }
+}
+
+// MARK: - コマの一覧
+
+/// テザーとカードの切り替えと、コマの並び。1 行にまとめる
+struct ShotStrip: View {
     @EnvironmentObject var session: CameraSession
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 6) {
-                ForEach(session.shots) { shot in
-                    ZStack {
-                        if let t = shot.thumbnail {
-                            Image(uiImage: t).resizable().aspectRatio(contentMode: .fill)
-                        } else {
-                            Rectangle().fill(Color(uiColor: .tertiarySystemBackground))
-                            ProgressView().controlSize(.small)
-                        }
-                        VStack {
-                            HStack(spacing: 2) {
-                                Spacer()
-                                if shot.location != nil {
-                                    Image(systemName: "location.fill")
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(.white.opacity(0.85))
-                                }
-                                if shot.localURL != nil {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.green)
-                                }
+        HStack(spacing: 10) {
+            SourceToggle()
+                .padding(.leading, 14)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 6) {
+                    ForEach(session.shots) { shot in
+                        Thumbnail(image: shot.thumbnail, located: shot.location != nil,
+                                  imported: shot.localURL != nil, selected: shot.id == session.selection)
+                            .onTapGesture {
+                                guard session.selection != shot.id else { return }
+                                Haptics.select()
+                                session.selection = shot.id
                             }
-                            .padding(3)
-                            Spacer()
-                        }
+                            .onAppear { session.requestThumbnail(for: shot) }
                     }
-                    .frame(width: 104, height: 70)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5)
-                            .strokeBorder(shot.id == session.selection ? Color.accentColor : .clear, lineWidth: 2)
-                    )
-                    .onTapGesture {
-                        guard session.selection != shot.id else { return }
-                        Haptics.select()
-                        session.selection = shot.id
-                    }
-                    .onAppear { session.requestThumbnail(for: shot) }
                 }
+                .padding(.vertical, 4)
+                .padding(.trailing, 14)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 10)
         }
+        .frame(height: 56)
     }
 }
 
-/// ホワイトバランス。選択肢が少なく触る頻度も低いので、
-/// スクラバーを増やさずプルダウンに収める。
+/// コマ 1 枚。表示に使う値だけを受け取る
+private struct Thumbnail: View {
+    let image: UIImage?
+    /// 撮影地点を付けられる
+    let located: Bool
+    let imported: Bool
+    let selected: Bool
+
+    var body: some View {
+        ZStack {
+            if let image {
+                Image(uiImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Rectangle().fill(Theme.surfaceRaised)
+                ProgressView().controlSize(.mini).tint(Theme.dim)
+            }
+        }
+        .frame(width: 66, height: 44)
+        .overlay(alignment: .topTrailing) {
+            if located {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.6), radius: 1.5)
+                    .padding(3)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if imported {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.onAmber, Theme.amber)
+                    .padding(2)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(selected ? Theme.amber : .clear, lineWidth: 2)
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+/// テザー撮影ぶんとカード内を切り替える。
+/// 既定はテザー。接続後に撮ったカットだけを出す（Mac 版と同じ考え方）。
+/// 標準のセグメントにして、iOS 26 では選択中が Liquid Glass になるようにする
+struct SourceToggle: View {
+    @EnvironmentObject var session: CameraSession
+
+    var body: some View {
+        Picker("", selection: Binding(
+            get: { session.browsingCard },
+            set: {
+                guard $0 != session.browsingCard else { return }
+                Haptics.select()
+                session.browsingCard = $0
+            }
+        )) {
+            Text("テザー \(session.liveShots.count)").tag(false)
+            Text(cardLabel).tag(true)
+        }
+        .pickerStyle(.segmented)
+        .fixedSize()
+        .disabled(!session.isConnected)
+    }
+
+    private var cardLabel: String {
+        session.catalogReady || !session.isConnected
+            ? String(localized: "カード \(session.cardShots.count)")
+            : String(localized: "カード \(session.catalogProgress)%")
+    }
+}
+
+// MARK: - 操作パネル
+
+struct ControlPanel: View {
+    @EnvironmentObject var session: CameraSession
+
+    /// スクラバーは撮影モードで 2〜3 本に変わる。そのたびにシャッターが上下しないよう、3 本ぶんの高さを取っておく
+    private static let scrubberRows: CGFloat = 3 * 44 + 2 * 6
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ExposureReadout()
+                .frame(height: 24)
+
+            VStack(spacing: 6) {
+                ForEach(session.adjustable, id: \.self) { prop in
+                    if let desc = session.props[prop] {
+                        ScrubberControl(
+                            title: prop.label,
+                            options: desc.choiceTexts,
+                            selectedIndex: desc.choices.firstIndex(of: desc.current) ?? 0,
+                            enabled: desc.writable,
+                            onSelect: { index in
+                                await session.setProp(prop, to: desc.choices[index])
+                            }
+                        )
+                    }
+                }
+            }
+            .frame(height: session.isConnected ? Self.scrubberRows : nil, alignment: .top)
+
+            HStack(spacing: 0) {
+                Group {
+                    if let mode = session.props[.exposureProgram], !mode.choices.isEmpty {
+                        // 選択肢はカメラが申告したものをそのまま出す。
+                        // 機種によって並びも項目数も違うため決め打ちにしない。
+                        ModeSelector(desc: mode) { value in
+                            await session.setProp(.exposureProgram, to: value)
+                        }
+                    } else if let mode = session.props[.exposureProgram] {
+                        Text(mode.currentText)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Theme.dim)
+                            .frame(width: 36, height: 36)
+                            .background(Theme.surface, in: Circle())
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                ShutterButton(busy: session.busy, enabled: session.isConnected) {
+                    Haptics.shutter()
+                    Task { await session.capture() }
+                }
+
+                WhiteBalanceMenu()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .frame(height: 80)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+    }
+}
+
+/// スクラバーの上の 1 行。撮影モードに応じて、カメラ任せの値か露出計を出す
+struct ExposureReadout: View {
+    @EnvironmentObject var session: CameraSession
+
+    var body: some View {
+        HStack(spacing: 14) {
+            if session.cannotAdjustSettings {
+                Label("この機種は USB から設定を変えられません。露出や ISO は本体で設定してください。", systemImage: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.dim)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+            } else if session.lightMeterMeaningful {
+                Text("露出計")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.dim)
+                LightMeterView(value: session.lightMeter)
+            } else if !session.cameraDecided.isEmpty {
+                ForEach(session.cameraDecided, id: \.self) { prop in
+                    if let desc = session.props[prop] {
+                        HStack(spacing: 5) {
+                            Text(prop.label)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.dim)
+                            Text(desc.currentText)
+                                .font(.system(size: 14, weight: .semibold, design: .rounded).monospacedDigit())
+                                .contentTransition(.numericText())
+                                .animation(.snappy(duration: 0.18), value: desc.current)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+    }
+}
+
+/// カメラの露出計をそのまま可視化する。
+/// 中央が適正。Nikon の慣習に合わせ、左が＋（露出過多）、右が−（露出不足）。
+/// Canon とは左右が逆になる。
+struct LightMeterView: View {
+    let value: Double?
+
+    var body: some View {
+        let ev = max(-3, min(3, value ?? 0))
+        HStack(spacing: 6) {
+            Text("+").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.dim)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    HStack(spacing: 0) {
+                        ForEach(0..<13) { i in
+                            Rectangle()
+                                .fill(i == 6 ? Theme.dim : Theme.dimmer.opacity(i % 2 == 0 ? 1 : 0.6))
+                                .frame(width: 1, height: i == 6 ? 14 : (i % 2 == 0 ? 9 : 5))
+                            if i < 12 { Spacer(minLength: 0) }
+                        }
+                    }
+                    .frame(height: 16)
+
+                    if value != nil {
+                        Capsule()
+                            .fill(Theme.amber)
+                            .frame(width: 3, height: 16)
+                            .offset(x: (geo.size.width - 3) * ((3 - ev) / 6))
+                            .animation(.easeOut(duration: 0.15), value: ev)
+                    }
+                }
+                .frame(height: 16)
+            }
+            .frame(maxWidth: 170)
+            .frame(height: 16)
+            Text("−").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.dim)
+            Text(value.map { abs($0) < 0.05 ? "±0" : String(format: "%+.1f", $0) } ?? "—")
+                .font(.system(size: 13, weight: .semibold, design: .rounded).monospacedDigit())
+                .foregroundStyle(value.map { abs($0) < 0.2 } == true ? Theme.amber : Theme.text)
+                .frame(width: 36, alignment: .trailing)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("露出計"))
+        .accessibilityValue(Text(value.map { String(format: "%+.1f EV", $0) } ?? "—"))
+    }
+}
+
 /// 白バランス。ボタンには今の設定のアイコンだけを出し、名前はメニューの中で読む。
 ///
 /// 以前はボタンに「電球」「晴天」などの文字を載せていて、横に並ぶ部品に押されて潰れていた。
@@ -570,10 +812,10 @@ struct WhiteBalanceMenu: View {
                 .pickerStyle(.inline)
             } label: {
                 Image(systemName: PropFormat.whiteBalanceSymbol(shown))
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.primary)
-                    .frame(width: 32, height: 32)
-                    .background(Color(uiColor: .tertiarySystemFill), in: Circle())
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(Theme.text)
+                    .frame(width: 44, height: 44)
+                    .glassCircle()
                     .contentTransition(.symbolEffect(.replace))
             }
             .accessibilityLabel(Text("白バランス: \(PropFormat.text(.whiteBalance, shown))"))
@@ -597,97 +839,11 @@ struct WhiteBalanceMenu: View {
     }
 }
 
-// MARK: - 操作パネル
-
-struct ControlPanel: View {
-    @EnvironmentObject var session: CameraSession
-    @State private var showGeoPanel = false
-
-    var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                if let mode = session.props[.exposureProgram], !mode.choices.isEmpty {
-                    // 選択肢はカメラが申告したものをそのまま出す。
-                    // 機種によって並びも項目数も違うため決め打ちにしない。
-                    ModeSelector(desc: mode) { value in
-                        await session.setProp(.exposureProgram, to: value)
-                    }
-                } else if let mode = session.props[.exposureProgram] {
-                    Text(mode.currentText)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Color(uiColor: .tertiarySystemBackground),
-                                    in: RoundedRectangle(cornerRadius: 5))
-                }
-                if let bias = session.props[.exposureBias] {
-                    Text(bias.currentText)
-                        .font(.system(size: 11).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                WhiteBalanceMenu()
-                Button {
-                    showGeoPanel = true
-                } label: {
-                    Image(systemName: session.geotagging ? "location.fill" : "location.slash")
-                        .font(.system(size: 12))
-                        .foregroundStyle(session.geotagging ? Color.accentColor : .secondary)
-                }
-                .help("位置情報")
-                Spacer(minLength: 4)
-                Button {
-                    Haptics.shutter()
-                    Task { await session.capture() }
-                } label: {
-                    Group {
-                        if session.busy {
-                            ProgressView().tint(.white)
-                        } else {
-                            Image(systemName: "camera.shutter.button").font(.system(size: 26))
-                        }
-                    }
-                    .frame(width: 54, height: 54)
-                }
-                .buttonStyle(.borderedProminent)
-                .clipShape(Circle())
-                .disabled(!session.isConnected || session.busy)
-            }
-
-            if session.cannotAdjustSettings {
-                Label("この機種は USB から設定を変えられません。露出や ISO は本体で設定してください。", systemImage: "info.circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            ForEach(session.adjustable, id: \.self) { prop in
-                if let desc = session.props[prop], !desc.choices.isEmpty {
-                    ScrubberControl(
-                        title: prop.label,
-                        options: desc.choiceTexts,
-                        selectedIndex: desc.choices.firstIndex(of: desc.current) ?? 0,
-                        enabled: desc.writable,
-                        onSelect: { index in
-                            await session.setProp(prop, to: desc.choices[index])
-                        }
-                    )
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .sheet(isPresented: $showGeoPanel) {
-            GeoPanel().environmentObject(session)
-        }
-    }
-}
-
-
 /// 撮影モードの切り替え。標準のセグメントで、選択中のガラスが正円になる幅に固定する。
 ///
 /// iOS 26 の標準セグメントは、本体の高さが 32 で、選択中のガラス（_UILiquidLensView）が
 /// 上下左右に 2 ずつ内側に描かれる。ガラスの高さは幅によらず 28 なので、区画の幅を 32 にすると
 /// 28×28 の正円になる（シミュレータで幅 120〜170 の実寸を読んで確認）。
-/// 以前は幅 150 に押し込んでいたため、ガラスが 33.5×28 の楕円になっていた。
 ///
 /// スクラバーと同じく、押した瞬間にその区画を選んだ状態にしてカメラの返事を待つ。
 struct ModeSelector: View {

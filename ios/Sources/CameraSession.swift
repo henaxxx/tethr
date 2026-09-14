@@ -61,6 +61,8 @@ final class CameraSession: NSObject, ObservableObject {
     }
     @Published var selection: Shot.ID?
     @Published var lastError: String?
+    /// 取り込み中のカット（ファイル名 → 0〜1）。取り込みボタンがカプセルの中を満たすのに使う
+    @Published private(set) var importProgress: [String: Double] = [:]
 
     private let browser = ICDeviceBrowser()
     private var camera: ICCameraDevice?
@@ -151,6 +153,12 @@ final class CameraSession: NSObject, ObservableObject {
     /// いま衛星で測っているか。設定画面に出す
     @Published private(set) var gpsMode: LocationProvider.Mode = .off
     private let pocket = PocketDetector()
+    #if DEBUG
+    /// カメラ無しで画面を確かめるための、つながったふりの状態（起動引数 -demo）
+    private(set) var demo = false
+    /// デモでまだ届いていないことにしてあるサムネイル。一覧に出たときに少し遅れて入れる
+    private var demoPendingThumbnails: [String: UIImage] = [:]
+    #endif
     /// ライブビュー。映像は別の観測対象に分けてあり、画面全体は描き直さない
     let live = LiveViewController()
     /// いまつないでいるカメラの識別子。カメラごとの覚え書きに使う
@@ -161,10 +169,36 @@ final class CameraSession: NSObject, ObservableObject {
     private var deferredThumbnails: Set<String> = []
     private var prefetchTask: Task<Void, Never>?
 
-    /// スクラバーで操作する設定
+    private var shutterProp: PTP.Prop {
+        (props[.nikonExposureTime]?.choices.isEmpty == false) ? .nikonExposureTime : .exposureTime
+    }
+
+    /// スクラバーで操作する設定。撮影モードで、利用者が決める値だけを並べる。
+    ///
+    /// 以前は常にシャッター・絞り・ISO の 3 本で、A モードではシャッターが押せないまま場所を取り、
+    /// A・S・P で一番触る露出補正は表示だけだった
     var adjustable: [PTP.Prop] {
-        let shutter: PTP.Prop = (props[.nikonExposureTime]?.choices.isEmpty == false) ? .nikonExposureTime : .exposureTime
-        return [shutter, .fNumber, .iso]
+        let candidates: [PTP.Prop]
+        switch props[.exposureProgram]?.current {          // PTP の ExposureProgramMode
+        case 1: candidates = [shutterProp, .fNumber, .iso]              // M
+        case 2: candidates = [.iso, .exposureBias]                      // P
+        case 3: candidates = [.fNumber, .iso, .exposureBias]            // A
+        case 4: candidates = [shutterProp, .iso, .exposureBias]         // S
+        default:
+            // シーンモードなど。カメラが書き換えを許しているものだけ出す
+            candidates = [shutterProp, .fNumber, .iso, .exposureBias].filter { props[$0]?.writable == true }
+        }
+        return candidates.filter { props[$0]?.choices.isEmpty == false }
+    }
+
+    /// カメラ任せになっている露出の値（A モードのシャッターなど）。スクラバーの上に数字だけ出す
+    var cameraDecided: [PTP.Prop] {
+        switch props[.exposureProgram]?.current {
+        case 2: return [shutterProp, .fNumber].filter { props[$0] != nil }
+        case 3: return [shutterProp].filter { props[$0] != nil }
+        case 4: return [.fNumber].filter { props[$0] != nil }
+        default: return []
+        }
     }
 
     /// 軌跡を背面でも取り続けるか。撮影の合間に画面を消しても切れないようにする。
@@ -1080,6 +1114,9 @@ final class CameraSession: NSObject, ObservableObject {
     @discardableResult
     func setProp(_ prop: PTP.Prop, to value: Int64) async -> Bool {
         guard let desc = props[prop] else { return false }
+        #if DEBUG
+        if demo { return await demoSetProp(prop, to: value) }
+        #endif
         var payload = Data()
         switch desc.dataType {
         case .int8, .uint8:   payload.appendLE(UInt8(truncatingIfNeeded: value))
@@ -1131,6 +1168,9 @@ final class CameraSession: NSObject, ObservableObject {
     /// シャッターを切る。撮影後のファイルはイベント経由で一覧に加わる。
     func capture() async {
         guard isConnected, !busy else { return }
+        #if DEBUG
+        if demo { return await demoCapture() }
+        #endif
         busy = true
         defer { busy = false }
         if live.isActive {
@@ -1237,6 +1277,15 @@ final class CameraSession: NSObject, ObservableObject {
     /// 一括で要求すると 1 枚ごとに PTP の往復が走り、USB 2.0 が飽和して
     /// 他の操作まで待たされる。表示に必要な分だけ、遅延で取る。
     func requestThumbnail(for shot: Shot) {
+        #if DEBUG
+        if demo, let image = demoPendingThumbnails.removeValue(forKey: shot.name) {
+            Task {
+                try? await Task.sleep(for: .milliseconds(Int.random(in: 300...1200)))
+                if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].thumbnail = image }
+            }
+            return
+        }
+        #endif
         if pocketed {
             deferredThumbnails.insert(shot.name)
             return
@@ -1245,15 +1294,18 @@ final class CameraSession: NSObject, ObservableObject {
               let file = fileIndex[shot.name] else { return }
         thumbnailRequested.insert(shot.name)
         // 一覧用は小さくてよい。大きく要求すると転送量が増えて一覧の描画が遅れる。
+        // 向きはプレビューを読むまで分からない。ImageCaptureCore が知っていればそれを使う
+        let reported = Int(file.orientation.rawValue)
+        let hint = reported == 1 ? nil : reported
         file.requestThumbnailData(options: [.imageSourceThumbnailMaxPixelSize: 320]) { [weak self] data, _ in
             guard let data, let image = UIImage(data: data) else { return }
             Task { @MainActor in
                 guard let self else { return }
                 if let i = self.liveShots.firstIndex(where: { $0.name == shot.name }) {
-                    self.liveShots[i].thumbnail = image
+                    self.liveShots[i].thumbnail = image.applyingCameraOrientation(self.liveShots[i].orientation ?? hint)
                 }
                 if let i = self.cardShots.firstIndex(where: { $0.name == shot.name }) {
-                    self.cardShots[i].thumbnail = image
+                    self.cardShots[i].thumbnail = image.applyingCameraOrientation(self.cardShots[i].orientation ?? hint)
                 }
             }
         }
@@ -1274,11 +1326,13 @@ final class CameraSession: NSObject, ObservableObject {
             guard let self else { return }
             var image: UIImage?
 
-            // 先頭部分だけ読んで、埋め込み JPEG の位置を割り出す
-            if let header = await self.read(file, offset: 0, length: 128 * 1024),
-               let loc = NEF.largestPreview(in: header),
-               loc.length > 0, loc.length < 40 * 1024 * 1024 {
-                if let jpeg = await self.read(file, offset: off_t(loc.offset), length: off_t(loc.length)) {
+            var orientation: Int?
+            // 先頭部分だけ読んで、埋め込み JPEG の位置と撮影時の向きを割り出す
+            if let header = await self.read(file, offset: 0, length: 128 * 1024) {
+                orientation = NEF.orientation(in: header)
+                if let loc = NEF.largestPreview(in: header),
+                   loc.length > 0, loc.length < 40 * 1024 * 1024,
+                   let jpeg = await self.read(file, offset: off_t(loc.offset), length: off_t(loc.length)) {
                     image = UIImage(data: jpeg)
                 }
             }
@@ -1287,13 +1341,26 @@ final class CameraSession: NSObject, ObservableObject {
                 image = await self.thumbnailData(file, maxPixel: 2400).flatMap(UIImage.init(data:))
             }
             guard let image else { return }
+            #if DEBUG
+            if let orientation, orientation != 1 {
+                DebugLog.write("向き: \(shot.name) Orientation=\(orientation) ICC=\(file.orientation.rawValue) 埋め込み \(Int(image.size.width))×\(Int(image.size.height))")
+            }
+            #endif
+            self.applyPreview(image.applyingCameraOrientation(orientation), orientation: orientation, to: shot.name)
+        }
+    }
 
-            if let i = self.liveShots.firstIndex(where: { $0.name == shot.name }) {
-                self.liveShots[i].preview = image
-            }
-            if let i = self.cardShots.firstIndex(where: { $0.name == shot.name }) {
-                self.cardShots[i].preview = image
-            }
+    /// プレビューと向きを入れる。先に届いていたサムネイルも同じ向きに回す
+    private func applyPreview(_ image: UIImage, orientation: Int?, to name: String) {
+        if let i = liveShots.firstIndex(where: { $0.name == name }) {
+            liveShots[i].preview = image
+            liveShots[i].orientation = orientation
+            liveShots[i].thumbnail = liveShots[i].thumbnail?.applyingCameraOrientation(orientation)
+        }
+        if let i = cardShots.firstIndex(where: { $0.name == name }) {
+            cardShots[i].preview = image
+            cardShots[i].orientation = orientation
+            cardShots[i].thumbnail = cardShots[i].thumbnail?.applyingCameraOrientation(orientation)
         }
     }
 
@@ -1362,6 +1429,9 @@ final class CameraSession: NSObject, ObservableObject {
     /// 取り込みの入口。カメラから読み出し、写真アプリへ保存するまでを行う。
     @discardableResult
     func importShot(_ shot: Shot) async -> URL? {
+        #if DEBUG
+        if demo { return await demoImport(shot) }
+        #endif
         var shot = shot
         if shot.location == nil, geotagging, !liveShots.contains(where: { $0.name == shot.name }) {
             // 一覧に並べた後に軌跡が増えていることがある（Mac へ送る前の記録など）。取り込む時点でもう一度探す
@@ -1369,10 +1439,33 @@ final class CameraSession: NSObject, ObservableObject {
             if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].location = shot.location }
         }
         DebugLog.write("取り込み: \(shot.name) 位置 \(shot.location.map { String(format: "%.5f,%.5f ±%.0fm", $0.coordinate.latitude, $0.coordinate.longitude, $0.horizontalAccuracy) } ?? "なし")")
-        guard let url = await download(shot) else { return nil }
+        guard importProgress[shot.name] == nil else { return nil }
+        importProgress[shot.name] = 0
+        guard let url = await download(shot) else {
+            importProgress[shot.name] = nil
+            return nil
+        }
+        // 読み出しで 9 割、写真アプリへの保存で残りを満たす
+        importProgress[shot.name] = 0.95
         markDownloaded(shot, url: url)
         _ = await saveToPhotos(url, shot: shot)
+        await finishImportProgress(shot.name)
         return url
+    }
+
+    /// 満ちきったところを一瞬見せてから、保存済みの表示に切り替える
+    private func finishImportProgress(_ name: String) async {
+        importProgress[name] = 1
+        try? await Task.sleep(for: .milliseconds(220))
+        importProgress[name] = nil
+    }
+
+    /// 進み具合を画面に出す。ObservableObject 全体が描き直されるので、細かい変化は間引く
+    private func reportDownloadProgress(_ name: String, _ fraction: Double) {
+        guard let current = importProgress[name] else { return }
+        let value = min(max(fraction, 0), 1) * 0.9
+        guard value - current >= 0.03 else { return }
+        importProgress[name] = value
     }
 
     private func download(_ shot: Shot) async -> URL? {
@@ -1380,11 +1473,14 @@ final class CameraSession: NSObject, ObservableObject {
         transferCount += 1
         defer { transferCount -= 1 }
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return await withCheckedContinuation { cont in
-            file.requestDownload(options: [
+        let name = shot.name
+        let watch = ProgressWatch()
+        let url: URL? = await withCheckedContinuation { cont in
+            let progress = file.requestDownload(options: [
                 .downloadsDirectoryURL: dir,
                 .overwrite: true,
             ]) { filename, error in
+                watch.stop()
                 if let error {
                     Task { @MainActor in self.lastError = String(localized: "取り込みに失敗しました: \(error.localizedDescription)") }
                     cont.resume(returning: nil)
@@ -1392,7 +1488,270 @@ final class CameraSession: NSObject, ObservableObject {
                 }
                 cont.resume(returning: filename.map { dir.appendingPathComponent($0) })
             }
+            watch.start(progress) { [weak self] fraction in
+                Task { @MainActor in self?.reportDownloadProgress(name, fraction) }
+            }
         }
+        return url
+    }
+}
+
+#if DEBUG
+// MARK: - デモ
+
+/// シミュレータにはカメラをつなげないので、画面を詰めるときはつながったふりをする。
+/// 起動引数 -demo で入る。製品版には含めない
+extension CameraSession {
+    static var demoRequested: Bool { ProcessInfo.processInfo.arguments.contains("-demo") }
+
+    private static func demoArgument(_ name: String) -> Substring? {
+        ProcessInfo.processInfo.arguments.first { $0.hasPrefix("-\(name)=") }?.dropFirst(name.count + 2)
+    }
+
+    /// 起動引数 -demoMode=M のように撮影モードを選べる
+    private static var demoStartMode: Int64 {
+        switch demoArgument("demoMode") {
+        case "M": return 1
+        case "P": return 2
+        case "S": return 4
+        default: return 3
+        }
+    }
+
+    func loadDemo() {
+        demo = true
+        PropFormat.vendor = PropFormat.vendorNikon
+        state = .connected("D300")
+        catalogReady = true
+        catalogProgress = 100
+        applyDemoValues([
+            .exposureProgram: Self.demoStartMode,
+            .nikonExposureTime: Self.demoShutter(numerator: 1, denominator: 15),
+            .fNumber: 450, .iso: 400, .exposureBias: -333, .whiteBalance: 6, .batteryLevel: 60,
+        ])
+        let now = Date()
+        let here = CLLocation(latitude: 35.6812, longitude: 139.7671)
+        liveShots = (0..<3).map { i in
+            let image = DemoImage.shot(seed: i, portrait: i == 1)
+            return Shot(name: String(format: "_DSC%04d.NEF", 5182 - i), size: 11_400_000 - i * 180_000,
+                        captured: now.addingTimeInterval(Double(-i * 45)),
+                        thumbnail: image, preview: image, location: i == 2 ? nil : here)
+        }
+        cardShots = (0..<24).map { i in
+            let image = DemoImage.shot(seed: i + 10, portrait: i % 5 == 3)
+            return Shot(name: String(format: "_DSC%04d.NEF", 5179 - i), size: 10_900_000,
+                        captured: now.addingTimeInterval(Double(-3600 - i * 300)),
+                        thumbnail: image, preview: image)
+        }
+        // カード側のサムネイルは、実機と同じく一覧に出てから届くようにする
+        for i in cardShots.indices {
+            demoPendingThumbnails[cardShots[i].name] = cardShots[i].thumbnail
+            cardShots[i].thumbnail = nil
+        }
+        cardShots[1].localURL = FileManager.default.temporaryDirectory.appendingPathComponent(cardShots[1].name)
+        cardShots[1].savedToPhotos = true
+        // -demoCard でカード側、-demoShot=1 で何枚目を選ぶか、-demoLive でライブビュー
+        browsingCard = ProcessInfo.processInfo.arguments.contains("-demoCard")
+        let index = Self.demoArgument("demoShot").flatMap { Int($0) } ?? 0
+        selection = shots.indices.contains(index) ? shots[index].id : shots.first?.id
+        // -demoAct で、起動の 2.5 秒後にシャッターと取り込みを押したことにする（押している最中の見た目を撮るため）
+        if ProcessInfo.processInfo.arguments.contains("-demoAct") {
+            Task {
+                try? await Task.sleep(for: .milliseconds(2500))
+                if let shot = shots.first(where: { $0.id == selection }) { await importShot(shot) }
+                await capture()
+            }
+        }
+        if ProcessInfo.processInfo.arguments.contains("-demoReview") {
+            reviewOnReturn = selection
+        }
+        if ProcessInfo.processInfo.arguments.contains("-demoLive") {
+            Task { await live.start() }
+        }
+    }
+
+    private func demoSetProp(_ prop: PTP.Prop, to value: Int64) async -> Bool {
+        // PTP の往復ぶん待たせて、返事待ちの表示も確かめられるようにする
+        try? await Task.sleep(for: .milliseconds(150))
+        var values = props.mapValues(\.current)
+        values[prop] = value
+        applyDemoValues(values)
+        return true
+    }
+
+    private func demoCapture() async {
+        busy = true
+        try? await Task.sleep(for: .milliseconds(1400))
+        busy = false
+        Haptics.shotArrived()
+        let number = 5183 + liveShots.count
+        let image = DemoImage.shot(seed: number, portrait: number % 4 == 0)
+        let shot = Shot(name: String(format: "_DSC%04d.NEF", number), size: 11_200_000, captured: Date(),
+                        thumbnail: image, preview: image, location: CLLocation(latitude: 35.6812, longitude: 139.7671))
+        liveShots.insert(shot, at: 0)
+        browsingCard = false
+        selection = shot.id
+    }
+
+    private func demoImport(_ shot: Shot) async -> URL? {
+        guard importProgress[shot.name] == nil else { return nil }
+        importProgress[shot.name] = 0
+        // 最初の数字が届くまでの間（光の帯）も見えるようにする
+        try? await Task.sleep(for: .milliseconds(500))
+        for step in 1...20 {
+            try? await Task.sleep(for: .milliseconds(60))
+            reportDownloadProgress(shot.name, Double(step) / 20)
+        }
+        importProgress[shot.name] = 0.95
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(shot.name)
+        markDownloaded(shot, url: url)
+        if let i = liveShots.firstIndex(where: { $0.name == shot.name }) { liveShots[i].savedToPhotos = true }
+        if let i = cardShots.firstIndex(where: { $0.name == shot.name }) { cardShots[i].savedToPhotos = true }
+        try? await Task.sleep(for: .milliseconds(150))
+        await finishImportProgress(shot.name)
+        return url
+    }
+
+    /// 撮影モードに応じて、カメラ任せの値と露出計を D300 らしく動かす
+    private func applyDemoValues(_ input: [PTP.Prop: Int64]) {
+        var v = input
+        let mode = v[.exposureProgram] ?? 3
+        let shutterChoices = Self.demoShutterChoices
+        let apertureChoices: [Int64] = [350, 400, 450, 500, 560, 630, 710, 800, 900, 1000, 1100, 1300, 1400, 1600, 1800, 2000, 2200]
+
+        func seconds(_ raw: Int64) -> Double { Double(raw >> 16) / Double(raw & 0xFFFF) }
+        func cameraEV(_ shutter: Int64, _ aperture: Int64) -> Double {
+            let n = Double(aperture) / 100
+            return log2(n * n / seconds(shutter))
+        }
+        // 室内の明るさ。ISO と露出補正を織り込んだ、適正になるカメラ側の EV
+        let target = 6.3 + log2(Double(v[.iso] ?? 400) / 100) - Double(v[.exposureBias] ?? 0) / 1000
+        func nearest(_ choices: [Int64], _ ev: (Int64) -> Double) -> Int64 {
+            choices.min { abs(ev($0) - target) < abs(ev($1) - target) } ?? choices[0]
+        }
+        switch mode {
+        case 2:
+            v[.fNumber] = 560
+            v[.nikonExposureTime] = nearest(shutterChoices) { cameraEV($0, 560) }
+        case 3:
+            v[.nikonExposureTime] = nearest(shutterChoices) { cameraEV($0, v[.fNumber] ?? 450) }
+        case 4:
+            v[.fNumber] = nearest(apertureChoices) { cameraEV(v[.nikonExposureTime] ?? 0x1000F, $0) }
+        default:
+            break
+        }
+        let shutter = v[.nikonExposureTime] ?? 0x1000F
+        let aperture = v[.fNumber] ?? 450
+        let deviation = target - cameraEV(shutter, aperture)
+        lightMeter = mode == 1 ? max(-3, min(3, (deviation * 6).rounded() / 6)) : nil
+
+        func desc(_ prop: PTP.Prop, _ type: PTP.DataType, _ choices: [Int64], writable: Bool = true) -> PropDesc {
+            PropDesc(code: prop, dataType: type, writable: writable, current: v[prop] ?? choices[0], choices: choices)
+        }
+        props = [
+            .exposureProgram: desc(.exposureProgram, .uint16, [1, 2, 3, 4]),
+            .nikonExposureTime: desc(.nikonExposureTime, .uint32, shutterChoices, writable: mode == 1 || mode == 4),
+            .fNumber: desc(.fNumber, .uint16, apertureChoices, writable: mode == 1 || mode == 3),
+            .iso: desc(.iso, .uint16, [200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200]),
+            .exposureBias: desc(.exposureBias, .int16, (-15...15).map { Int64((Double($0) * 1000 / 3).rounded()) }),
+            .whiteBalance: desc(.whiteBalance, .uint16, [2, 4, 5, 6, 7, 0x8010, 0x8011, 0x8012, 0x8013]),
+            .batteryLevel: desc(.batteryLevel, .uint8, [], writable: false),
+        ]
+    }
+
+    private static func demoShutter(numerator: Int64, denominator: Int64) -> Int64 {
+        numerator << 16 | denominator
+    }
+
+    /// D300 の 1/3 段の並び。Nikon 独自の分数（上位が分子、下位が分母）
+    private static let demoShutterChoices: [Int64] = {
+        let fast: [Int64] = [8000, 6400, 5000, 4000, 3200, 2500, 2000, 1600, 1250, 1000, 800, 640, 500, 400, 320,
+                             250, 200, 160, 125, 100, 80, 60, 50, 40, 30, 25, 20, 15, 13, 10, 8, 6, 5, 4, 3]
+        let slow: [(Int64, Int64)] = [(10, 25), (1, 2), (10, 16), (10, 13), (1, 1), (13, 10), (16, 10), (2, 1),
+                                      (25, 10), (3, 1), (4, 1), (5, 1), (6, 1), (8, 1), (10, 1), (13, 1), (15, 1),
+                                      (20, 1), (25, 1), (30, 1)]
+        return fast.map { demoShutter(numerator: 1, denominator: $0) } + slow.map { demoShutter(numerator: $0.0, denominator: $0.1) }
+    }()
+}
+
+/// デモ用の写真。空と山と太陽だけの、色の違う風景
+enum DemoImage {
+    /// カメラと同じく、縦位置のカットは横長の画素に向き 6 を付けて返す
+    static func shot(seed: Int, portrait: Bool) -> UIImage {
+        let upright = make(seed: seed, portrait: portrait)
+        guard portrait, let cg = upright.cgImage else { return upright }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let sideways = UIGraphicsImageRenderer(size: CGSize(width: cg.height, height: cg.width), format: format).image { ctx in
+            // 表示のとき時計回りに 90 度回して正立するよう、反時計回りに寝かせる
+            ctx.cgContext.translateBy(x: 0, y: CGFloat(cg.width))
+            ctx.cgContext.rotate(by: -.pi / 2)
+            UIImage(cgImage: cg).draw(at: .zero)
+        }
+        return sideways.applyingCameraOrientation(6)
+    }
+
+    static func make(seed: Int, portrait: Bool, sunShift: Double = 0) -> UIImage {
+        let size = portrait ? CGSize(width: 800, height: 1200) : CGSize(width: 1200, height: 800)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            let cg = ctx.cgContext
+            let hue = CGFloat((seed * 37) % 100) / 100
+            let sky = [UIColor(hue: hue, saturation: 0.45, brightness: 0.95, alpha: 1).cgColor,
+                       UIColor(hue: (hue + 0.08).truncatingRemainder(dividingBy: 1), saturation: 0.55, brightness: 0.55, alpha: 1).cgColor]
+            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: sky as CFArray, locations: [0, 1])!
+            cg.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
+
+            UIColor(white: 1, alpha: 0.85).setFill()
+            let sun = size.width * 0.09
+            let sunX = (0.2 + 0.5 * CGFloat(seed % 3) / 3 + 0.3 * CGFloat(sunShift)).truncatingRemainder(dividingBy: 0.9)
+            cg.fillEllipse(in: CGRect(x: size.width * sunX, y: size.height * 0.2, width: sun, height: sun))
+
+            for layer in 0..<3 {
+                let base = size.height * (0.55 + CGFloat(layer) * 0.12)
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: 0, y: size.height))
+                path.addLine(to: CGPoint(x: 0, y: base))
+                let peaks = 4 + (seed + layer) % 3
+                for p in 0...peaks {
+                    let x = size.width * CGFloat(p) / CGFloat(peaks)
+                    let lift = CGFloat(((seed + 3) * (p + 7) * (layer + 5)) % 23) / 23 * size.height * 0.14
+                    path.addLine(to: CGPoint(x: x, y: base - lift))
+                }
+                path.addLine(to: CGPoint(x: size.width, y: size.height))
+                path.close()
+                UIColor(hue: (hue + 0.5).truncatingRemainder(dividingBy: 1), saturation: 0.35,
+                        brightness: 0.42 - CGFloat(layer) * 0.12, alpha: 1).setFill()
+                path.fill()
+            }
+        }
+    }
+}
+#endif
+
+/// ダウンロードの Progress を見張る。完了の通知と進み具合の通知は別のキューから来るので、止めるのを 1 か所にまとめる
+private final class ProgressWatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observation: NSKeyValueObservation?
+    private var stopped = false
+
+    func start(_ progress: Progress?, onChange: @escaping (Double) -> Void) {
+        guard let progress else { return }
+        let observation = progress.observe(\.fractionCompleted, options: [.new]) { p, _ in
+            onChange(p.fractionCompleted)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        if stopped { observation.invalidate() } else { self.observation = observation }
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        stopped = true
+        observation?.invalidate()
+        observation = nil
     }
 }
 

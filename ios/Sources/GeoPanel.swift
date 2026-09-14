@@ -123,6 +123,7 @@ struct GeoPanel: View {
                 Text("控えてある撮影地点と軌跡がすべて失われます。取り込み済みの写真には影響しません。")
             }
         }
+        .tint(Theme.amber)
         .presentationDetents([.medium, .large])
     }
 }

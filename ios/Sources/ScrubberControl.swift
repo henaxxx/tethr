@@ -26,8 +26,10 @@ struct ScrubberControl: View {
     /// 返事を待つ間に次の操作が来たら、古い返事で表示を戻さないための番号
     @State private var generation = 0
 
-    private let itemWidth: CGFloat = 76
+    private let itemWidth: CGFloat = 62
     private let stripHeight: CGFloat = 44
+    /// 名前が載る左端の幅。値はこの下を通るあいだ消える
+    private let labelWidth: CGFloat = 80
 
     /// 表示の基準にする段。返事待ちなら選んだ段、そうでなければカメラの値
     private var baseIndex: Int {
@@ -42,44 +44,48 @@ struct ScrubberControl: View {
         return min(max(Int(shifted.rounded()), 0), options.count - 1)
     }
 
+    /// 値は帯の中央の枠で読み、名前は左端に重ねる。
+    ///
+    /// 帯は行の幅いっぱいに取り、枠を行の中央（＝画面の中央、シャッターの真上）に置く。
+    /// 名前の列を別に取ると、そのぶん枠が右へずれていた
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                strip(width: geo.size.width)
+                    .mask(edgeFade(width: geo.size.width))
+
+                RoundedRectangle(cornerRadius: 7)
+                    .strokeBorder(enabled ? Theme.amber : Theme.dimmer, lineWidth: 1.5)
+                    .frame(width: itemWidth - 6, height: stripHeight - 10)
+                    .frame(maxWidth: .infinity)
+                    // 書き込みの返事を待っている間は枠を少し沈ませ、送ったことを伝える
+                    .opacity(pendingIndex == nil ? 1 : 0.5)
+                    .animation(.easeInOut(duration: 0.2), value: pendingIndex == nil)
+
                 Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(options.isEmpty ? "—" : options[displayIndex])
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(enabled ? .primary : .tertiary)
-                    .contentTransition(.numericText())
-                    .animation(.snappy(duration: 0.18), value: displayIndex)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(enabled ? Theme.dim : Theme.dimmer)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .frame(width: labelWidth - 14, alignment: .leading)
+                    .padding(.leading, 12)
             }
-
-            GeometryReader { geo in
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color(uiColor: .secondarySystemBackground))
-
-                    strip(width: geo.size.width)
-                        .mask(edgeFade)
-
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(Color.accentColor.opacity(enabled ? 0.9 : 0.3), lineWidth: 2)
-                        .frame(width: itemWidth - 12, height: stripHeight - 10)
-                        // 書き込みの返事を待っている間は枠を少し沈ませ、送ったことを伝える
-                        .opacity(pendingIndex == nil ? 1 : 0.55)
-                        .animation(.easeInOut(duration: 0.2), value: pendingIndex == nil)
-                }
-                .frame(width: geo.size.width, height: stripHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .contentShape(Rectangle())
-                .gesture(scrub)
-            }
-            .frame(height: stripHeight)
+            .frame(width: geo.size.width, height: stripHeight)
+            .clipped()
+            .contentShape(Rectangle())
+            .gesture(scrub)
         }
-        .opacity(enabled ? 1 : 0.45)
+        .frame(height: stripHeight)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(title))
+        .accessibilityValue(Text(options.isEmpty ? "—" : options[displayIndex]))
+        .accessibilityAdjustableAction { direction in
+            guard enabled, !options.isEmpty else { return }
+            let target = baseIndex + (direction == .increment ? 1 : -1)
+            guard options.indices.contains(target) else { return }
+            commit(target)
+        }
         .disabled(!enabled)
         // 段をまたぐたびに軽く手応えを返す。カメラ側の変化（A モードで自動に変わる等）では鳴らさない
         .onChange(of: displayIndex) { _, _ in
@@ -95,8 +101,7 @@ struct ScrubberControl: View {
                                   weight: i == displayIndex ? .semibold : .regular,
                                   design: .rounded))
                     .monospacedDigit()
-                    .foregroundStyle(i == displayIndex ? AnyShapeStyle(Color.accentColor)
-                                                       : AnyShapeStyle(.secondary))
+                    .foregroundStyle(i != displayIndex ? Theme.dim : enabled ? Theme.amber : Theme.dim)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .frame(width: itemWidth)
@@ -110,12 +115,15 @@ struct ScrubberControl: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.88), value: baseIndex)
     }
 
-    private var edgeFade: some View {
-        LinearGradient(
+    /// 左は名前の下で消し、右は端でぼかす
+    private func edgeFade(width: CGFloat) -> some View {
+        let w = max(width, labelWidth + 80)
+        return LinearGradient(
             stops: [
                 .init(color: .clear, location: 0),
-                .init(color: .black, location: 0.14),
-                .init(color: .black, location: 0.86),
+                .init(color: .clear, location: (labelWidth - 6) / w),
+                .init(color: .black, location: (labelWidth + 34) / w),
+                .init(color: .black, location: 1 - 70 / w),
                 .init(color: .clear, location: 1),
             ],
             startPoint: .leading, endPoint: .trailing
@@ -142,25 +150,34 @@ struct ScrubberControl: View {
                 dragging = false
                 atEdge = false
                 let target = displayIndex
-                let current = selectedIndex
                 // 指を離した位置から、選んだ段の中央へなめらかに寄せる。返事を待たずにそこへ留める
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    pendingIndex = target == current ? nil : target
-                    dragOffset = 0
-                }
-                guard target != current else { return }
-                generation += 1
-                let mine = generation
-                Task { @MainActor in
-                    let accepted = await onSelect(target)
-                    // 返事を待つ間に次の操作があったら、そちらに任せる
-                    guard mine == generation else { return }
-                    // カメラの値に合わせる。通っていれば位置は変わらず、弾かれていれば元へ戻る
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+                if target == selectedIndex {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
                         pendingIndex = nil
+                        dragOffset = 0
                     }
-                    if !accepted { Haptics.warning() }
+                } else {
+                    commit(target)
                 }
             }
+    }
+
+    /// 選んだ段を書き込む。返事が来たらカメラの値に合わせる（通っていれば動かず、弾かれていれば元へ戻る）
+    private func commit(_ target: Int) {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            pendingIndex = target
+            dragOffset = 0
+        }
+        generation += 1
+        let mine = generation
+        Task { @MainActor in
+            let accepted = await onSelect(target)
+            // 返事を待つ間に次の操作があったら、そちらに任せる
+            guard mine == generation else { return }
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+                pendingIndex = nil
+            }
+            if !accepted { Haptics.warning() }
+        }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// NEF（Nikon の RAW）に埋め込まれた JPEG の位置を割り出す。
 ///
@@ -92,6 +93,27 @@ enum NEF {
         return candidates.max { $0.length < $1.length }
     }
 
+    /// 撮影時のカメラの向き（TIFF の Orientation、1〜8）。IFD0 にだけ入っている。
+    ///
+    /// 埋め込みの JPEG には向きが書かれていない（D300 の JpgFromRaw を exiftool で確認）。
+    /// カメラを縦に構えて撮っても、JPEG の画素は横長のまま届く
+    static func orientation(in header: Data) -> Int? {
+        guard header.count > 8 else { return nil }
+        let start = header.startIndex
+        let bigEndian: Bool
+        switch (header[start], header[start + 1]) {
+        case (0x4D, 0x4D): bigEndian = true
+        case (0x49, 0x49): bigEndian = false
+        default: return nil
+        }
+        let r = Cursor(data: header, bigEndian: bigEndian)
+        guard r.u16(at: 2) == 42, let ifd0 = r.u32(at: 4).map(Int.init),
+              let entry = r.entries(at: ifd0)?.first(where: { $0.tag == 0x0112 }),
+              let value = r.values(of: entry).first, (1...8).contains(value)
+        else { return nil }
+        return value
+    }
+
     // MARK: バイト列の読み取り
 
     private struct Entry {
@@ -159,5 +181,24 @@ enum NEF {
             }
             return out
         }
+    }
+}
+
+extension UIImage {
+    /// カメラが記録した向きを付ける。画素はそのままで、表示のときに回る。
+    ///
+    /// 横長のまま届いた絵にだけ付ける。すでに誰か（ImageCaptureCore など）が回して縦長になっている絵や、
+    /// 向きの付いた絵に重ねて付けると、二重に回ってしまうため
+    func applyingCameraOrientation(_ tiff: Int?) -> UIImage {
+        guard let tiff, imageOrientation == .up, let cg = cgImage else { return self }
+        let orientation: UIImage.Orientation
+        switch tiff {
+        case 3: orientation = .down
+        case 6: orientation = .right       // 表示するには時計回りに 90 度
+        case 8: orientation = .left        // 表示するには反時計回りに 90 度
+        default: return self
+        }
+        if tiff != 3 && size.width <= size.height { return self }
+        return UIImage(cgImage: cg, scale: scale, orientation: orientation)
     }
 }

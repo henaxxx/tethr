@@ -19,12 +19,25 @@ struct Shot: Identifiable, Equatable {
     var location: CLLocation?
     /// 端末内に取り込み済みなら、その場所
     var localURL: URL?
+    /// 撮影時のカメラの向き（TIFF の Orientation）。プレビューを読んだときに分かる
+    var orientation: Int?
 
     var sizeText: String {
         size >= 1_000_000 ? "\(size / 1_000_000)MB" : "\(size / 1000)KB"
     }
 
-    static func == (a: Shot, b: Shot) -> Bool { a.id == b.id }
+    /// SwiftUI は部品に渡した値をこの == で比べ、等しければ描き直さない。
+    /// 以前は ID だけを比べていて、サムネイルが届いても取り込みが済んでも、一覧のコマや取り込みボタンが古いままだった。
+    /// 画像と位置は中身を比べず、差し替わったかどうかだけを見る
+    static func == (a: Shot, b: Shot) -> Bool {
+        a.id == b.id
+            && a.thumbnail === b.thumbnail
+            && a.preview === b.preview
+            && a.location === b.location
+            && a.localURL == b.localURL
+            && a.savedToPhotos == b.savedToPhotos
+            && a.orientation == b.orientation
+    }
 }
 
 

@@ -11,9 +11,6 @@
 "カメラの時計を %lld 秒ぶん合わせました" = "Adjusted the camera clock by %lld seconds";
 
 /* 一覧 */
-"テザー (%lld)" = "Tethered (%lld)";
-"カード (%lld)" = "Card (%lld)";
-"カード 読込中 %lld%%" = "Card — loading %lld%%";
 "カードに写真がありません" = "No photos on the card";
 "カードを読み込んでいます…" = "Reading the card…";
 "シャッターを押すと、ここに表示されます" = "Shots appear here as you release the shutter";
@@ -123,3 +120,13 @@
 "カメラ" = "Camera";
 "ピントが合いませんでした" = "Could not focus";
 "応答なし" = "No response";
+
+/* 撮影画面（2026-09 の作り直し） */
+"テザー %lld" = "Tethered %lld";
+"カード %lld" = "Card %lld";
+"カード %lld%%" = "Card %lld%%";
+"露出計" = "Meter";
+"保存済み" = "Saved";
+"取り込み中" = "Importing";
+"全画面" = "Full screen";
+"閉じる" = "Close";

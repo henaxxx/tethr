@@ -63,6 +63,17 @@ struct PropDesc {
         }
     }
 
+    #if DEBUG
+    /// 画面の確認用に、カメラ無しで組み立てる
+    init(code: PTP.Prop, dataType: PTP.DataType, writable: Bool, current: Int64, choices: [Int64]) {
+        self.code = code
+        self.dataType = dataType
+        self.writable = writable
+        self.current = current
+        self.choices = choices
+    }
+    #endif
+
     var currentText: String { PropFormat.text(code, current) }
     var choiceTexts: [String] { choices.map { PropFormat.text(code, $0) } }
 }
@@ -122,10 +133,10 @@ enum PropFormat {
             return "\(value)"
 
         case .exposureBias:
-            // 0.001 EV 単位
+            // 0.001 EV 単位。スクラバーの 1 段に収まるよう単位は付けない（名前の「露出補正」で分かる）
             let ev = Double(value) / 1000
             if abs(ev) < 0.01 { return "±0" }
-            return String(format: "%@%.1fEV", ev > 0 ? "+" : "−", abs(ev))
+            return String(format: "%@%.1f", ev > 0 ? "+" : "−", abs(ev))
 
         case .batteryLevel:
             return "\(value)%"

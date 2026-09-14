@@ -10,7 +10,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="Tethr.app"
-VERSION="1.0"
+VERSION="1.1"
 
 # 署名 ID。指定が無ければ手元にあるものを自動で拾う。
 if [ -z "${SIGN_ID:-}" ]; then

@@ -18,7 +18,7 @@ Written over two days in September 2026 against the camera the author owns.
 | | |
 |---|---|
 | Tested camera | Nikon D300 (2007) |
-| macOS | 26.0+ — 1.0 (libgphoto2) shipping; `main` now uses ImageCaptureCore |
+| macOS | 26.0+ — 1.1 (ImageCaptureCore) shipping |
 | iOS | 17.0+ — submitted, awaiting review |
 
 Other PTP cameras will likely manage file listing, previews and import. Remote
@@ -38,8 +38,8 @@ ios/store/site/   The website, deployed to Cloudflare Pages.
 ```
 
 Both apps reach the camera the same way and share that layer. Until September
-2026 the Mac app drove libgphoto2 instead; version 1.0 still does, and what that
-route cost is kept below.
+2026 the Mac app drove libgphoto2 instead; version 1.0 did, and what that route
+cost is kept below.
 
 ## Building
 

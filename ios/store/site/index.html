@@ -50,12 +50,12 @@
       <img src="icon-mac.png" alt="">
       <h3>Tethr for Mac</h3>
       <p>
-        <span class="ja">ライブビューを見ながら撮り、RAW を外付けドライブへ直接流し込む。GPS の一括書き込みまで。</span>
-        <span class="en">Shoot against a live view, stream RAW straight to an external drive, and write GPS into a whole shoot at once.</span>
+        <span class="ja">ライブビューを見ながら撮り、RAW を外付けドライブへ直接流し込む。カードからの取り込みと GPS の書き込みまで。</span>
+        <span class="en">Shoot against a live view, stream RAW straight to an external drive, import from the card and write GPS on the way in.</span>
       </p>
-      <p class="req">macOS 26.0+ &nbsp;·&nbsp; 4.8 MB</p>
-      <a class="btn" href="Tethr-mac-1.0.zip" download>
-        <span class="ja">ダウンロード 1.0</span><span class="en">Download 1.0</span>
+      <p class="req">macOS 26.0+ &nbsp;·&nbsp; 4.1 MB</p>
+      <a class="btn" href="Tethr-mac-1.1.zip" download>
+        <span class="ja">ダウンロード 1.1</span><span class="en">Download 1.1</span>
       </a>
     </div>
   </div>
@@ -135,9 +135,14 @@
            <span class="en">Frames land in the folder you choose — an external SSD, a NAS — the moment they are taken.</span></p>
       </div>
       <div>
+        <h4><span class="ja">カードから取り込む</span><span class="en">Import from the card</span></h4>
+        <p><span class="ja">カードの中身を一覧で見て、選んだカットや、まだ取り込んでいないカットを撮影日ごとのフォルダへ。カードからは消しません。</span>
+           <span class="en">Browse the card and bring over the frames you pick, or everything not yet imported, into a folder per day. Nothing is deleted from the card.</span></p>
+      </div>
+      <div>
         <h4><span class="ja">RAW への GPS 書き込み</span><span class="en">GPS into RAW</span></h4>
-        <p><span class="ja">iPhone 版で記録した軌跡を同じネットワーク越しに受け取り、フォルダ内の RAW へ一括で書き込みます。原本は無傷です。</span>
-           <span class="en">Take the track recorded on your iPhone over the local network and write it into a folder of RAW files at once, leaving the originals intact.</span></p>
+        <p><span class="ja">iPhone 版で記録した軌跡を同じネットワーク越しに受け取り、カードから取り込むときに書き込みます。取り込み済みのフォルダへまとめて書き込むこともできます。</span>
+           <span class="en">Take the track recorded on your iPhone over the local network and write it in as frames come off the card, or into a folder you imported earlier.</span></p>
       </div>
       <div>
         <h4><span class="ja">本体操作を邪魔しない</span><span class="en">Out of the way</span></h4>
@@ -150,8 +155,8 @@
     <p class="ja">ダウンロードした zip を開き、出てきた <code>Tethr.app</code> をアプリケーションフォルダへ移動してください。Apple の公証を受けているので、警告は出ません。</p>
     <p class="en">Open the downloaded zip and move <code>Tethr.app</code> into your Applications folder. The app is notarised by Apple, so no warning appears.</p>
     <div class="note">
-      <span class="ja">Mac 版は libgphoto2 を同梱しており、LGPL に従って再リンク可能な形で配布しています。ソースと差し替え手順が必要な方はご連絡ください。</span>
-      <span class="en">The Mac app bundles libgphoto2 and is distributed in a relinkable form as the LGPL requires. Ask if you need the sources or instructions for replacing it.</span>
+      <span class="ja">1.1 から、カメラとのやり取りは macOS 標準の ImageCaptureCore で行います。同梱しているのは位置の書き込みに使う ExifTool だけです。libgphoto2 を同梱していた 1.0 のソースが必要な方はご連絡ください。</span>
+      <span class="en">From 1.1 the app talks to the camera through macOS’s own ImageCaptureCore, and the only thing bundled is ExifTool, for writing locations. If you need the sources for 1.0, which bundled libgphoto2, just ask.</span>
     </div>
   </section>
 

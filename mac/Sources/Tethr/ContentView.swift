@@ -208,7 +208,9 @@ struct LiveViewButton: View {
         } label: {
             Label("ライブビュー", systemImage: model.isLive ? "eye.fill" : "eye")
                 .labelStyle(.titleAndIcon)
-                .foregroundStyle(model.isLive ? AnyShapeStyle(Theme.amber) : AnyShapeStyle(.primary))
+                // 色を指定すると押せないときの薄さが消えるので、つながっていないときは自分で薄くする
+                .foregroundStyle(model.isLive ? AnyShapeStyle(Theme.amber)
+                                 : AnyShapeStyle(model.isConnected ? HierarchicalShapeStyle.primary : .tertiary))
         }
         .disabled(!model.isConnected)
         .help("ミラーアップして映像を受け取ります（⌘L）")

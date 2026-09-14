@@ -62,6 +62,13 @@ public struct DeviceInfo {
 
 /// DeviceInfo から分かる、このカメラが受け付けるもの。送ってはいけない命令をここで止める。
 ///
+/// 機種を 3 つに分けて扱う（`Support`）。
+/// - full: Nikon（Nikon 1 以外）。実機で確かめた手順（D300）をそのまま使う
+/// - nikon1: 下の記録にある命令を止める
+/// - basic: それ以外のメーカーすべて。確かめていない機種で知らない命令を送って固まらせないよう、
+///   標準の命令と標準の設定項目のうち、カメラが DeviceInfo で名乗ったものだけを通す。
+///   一覧・プレビュー・取り込みは ImageCaptureCore 側で動くので、これだけでも使える
+///
 /// Nikon 1（J1 など）は、名乗っていない命令や一部の独自命令を送ると USB の通信ごと固まり、
 /// ケーブルを挿し直すまで何も通らなくなる。libgphoto2 の記録:
 /// - ChangeCameraMode 0x90C2: J1 が固まる（#716。J1 はこの命令を名乗っていない）
@@ -70,12 +77,22 @@ public struct DeviceInfo {
 /// - InitiateCaptureRecInSdram 0x90C0: V1・J1 で不安定。標準の InitiateCapture 0x100E に置き換えて撮れている
 /// D300 など他の機種では、これまで実機で通っている手順を変えないよう止めない
 public struct CameraCapabilities {
+
+    public enum Support: String {
+        case full
+        case nikon1
+        case basic
+    }
+
     public let model: String
     public let operations: Set<UInt16>
     public let events: Set<UInt16>
     public let properties: Set<UInt16>
     /// libgphoto2 と同じ判定: Nikon で、機種名が J・V で始まるか S1・S2
     public let isNikon1: Bool
+    public let support: Support
+    /// 開発用。確かめてある機種も、指定した扱いで動かす（基本モードを D300 で試すため）
+    public static var forcedSupport: Support?
 
     private static let nikon1Unsafe: Set<UInt16> = [0x90C2, 0x90C7, 0x90CA, 0x90C0]
 
@@ -87,6 +104,12 @@ public struct CameraCapabilities {
         let nikon = info.manufacturer.localizedCaseInsensitiveContains("Nikon")
         let first = info.model.first
         isNikon1 = nikon && (first == "J" || first == "V" || (first == "S" && info.model.count < 3))
+        support = Self.forcedSupport ?? (isNikon1 ? .nikon1 : (nikon ? .full : .basic))
+    }
+
+    /// 標準の撮影命令（InitiateCapture）を名乗っているか。基本モードではこれが無いとシャッターを出さない
+    public var canInitiateCapture: Bool {
+        operations.contains(PTP.Op.initiateCapture.rawValue)
     }
 
     /// DeviceInfo を読めるまでは機種が分からない。標準の命令と標準のプロパティだけを通す。
@@ -104,7 +127,11 @@ public struct CameraCapabilities {
 
     /// 送ってはいけなければ、その理由と代わりに返す応答コード
     public func refusal(_ op: PTP.Op, params: [UInt32]) -> (reason: String, code: UInt16)? {
-        guard isNikon1 else { return nil }
+        switch support {
+        case .full: return nil
+        case .basic: return basicRefusal(op, params: params)
+        case .nikon1: break
+        }
         let code = op.rawValue
         if Self.nikon1Unsafe.contains(code) {
             return ("Nikon 1 で通信が壊れる命令", 0x2005)
@@ -116,6 +143,23 @@ public struct CameraCapabilities {
            let prop = params.first.map({ UInt16(truncatingIfNeeded: $0) }),
            !properties.contains(prop), !(0xF000...0xF01C).contains(prop) {
             return ("カメラが名乗っていないプロパティ", 0x200A)
+        }
+        return nil
+    }
+
+    /// 基本モード: メーカー独自のものは送らず、標準のものもカメラが名乗ったものだけにする
+    private func basicRefusal(_ op: PTP.Op, params: [UInt32]) -> (reason: String, code: UInt16)? {
+        let code = op.rawValue
+        if code >= 0x9000 {
+            return ("基本モードではメーカー独自の命令を送らない", 0x2005)
+        }
+        if code != PTP.Op.getDeviceInfo.rawValue, !operations.contains(code) {
+            return ("カメラが名乗っていない命令", 0x2005)
+        }
+        if [PTP.Op.getDevicePropDesc, .getDevicePropValue, .setDevicePropValue].contains(op),
+           let prop = params.first.map({ UInt16(truncatingIfNeeded: $0) }) {
+            if prop >= 0xD000 { return ("基本モードではメーカー独自の設定項目を読まない", 0x200A) }
+            if !properties.contains(prop) { return ("カメラが名乗っていない設定項目", 0x200A) }
         }
         return nil
     }

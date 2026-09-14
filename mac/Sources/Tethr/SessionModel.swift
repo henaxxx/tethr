@@ -358,7 +358,9 @@ final class SessionModel: ObservableObject {
 
     private func cameraReady(_ camera: PTPCamera) {
         deviceInfo = camera.info
-        checkEventUsable = camera.capabilities?.isNikon1 != true
+        // 本体の変化の問い合わせ（Nikon の CheckEvent）は、確かめた Nikon の手順でだけ使う。
+        // Nikon 1 では通信が壊れ、ほかのメーカーには送らない（基本モード）
+        checkEventUsable = camera.capabilities?.support == .full
         if camera.isNikon, camera.capabilities?.isNikon1 != true {
             let live = NikonLiveView(camera: camera, cameraIdentifier: camera.info?.serialNumber ?? "?")
             live.onChange = { [weak self] in self?.liveViewChanged() }
@@ -369,7 +371,8 @@ final class SessionModel: ObservableObject {
         clockOffset = link.clockDrift
         Task {
             await refreshAll()
-            startEventLoop()
+            // 基本モード（Nikon 以外）は、問い合わせる手段（CheckEvent・露出計）を持たないので回さない
+            if camera.capabilities?.support != .basic { startEventLoop() }
         }
     }
 

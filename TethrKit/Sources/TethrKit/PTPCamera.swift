@@ -70,7 +70,14 @@ public final class PTPCamera {
     /// 返事を待っている命令の数
     public private(set) var inFlight = 0
     public var log: (String) -> Void
+    /// 送った命令 1 つごとの結果（命令・引数・応答・所要時間）。確かめていないカメラの記録に使う
+    public var trace: ((String) -> Void)?
+    /// 基本モードで返事が来なかった。以後は命令を送らない（ImageCaptureCore の一覧や取り込みだけで続ける）
+    public private(set) var unresponsive = false
     private var refusalsLogged: Set<String> = []
+
+    /// 基本モードの命令を待つ上限。電源を入れた直後の下調べ（D300 で約 45 秒）は DeviceInfo までに終わっている
+    public static let basicTimeout: TimeInterval = 15
 
     /// Nikon の露出計（1/6 EV 刻みの符号付き整数）
     public static let lightMeterCode: UInt32 = 0xD1B1
@@ -94,7 +101,13 @@ public final class PTPCamera {
                      timeout: TimeInterval? = nil) async throws -> Data {
         let refusal = capabilities.map { $0.refusal(op, params: params) }
             ?? CameraCapabilities.refusalBeforeDeviceInfo(op, params: params)
+        let described = Self.describe(op, params)
+        if unresponsive {
+            trace?("\(described) → 送らない（前の命令に返事が無かった）")
+            throw PTPError.timedOut(String(format: "0x%04X", op.rawValue))
+        }
         if let refusal {
+            trace?("\(described) → 送らない（\(refusal.reason)）")
             let key = "\(op.rawValue)-\(params.first ?? 0)"
             if !refusalsLogged.contains(key) {
                 refusalsLogged.insert(key)
@@ -104,6 +117,7 @@ public final class PTPCamera {
             throw PTPError.response(refusal.code)
         }
         let label = String(format: "0x%04X", op.rawValue)
+        let timeout = timeout ?? (capabilities?.support == .basic ? Self.basicTimeout : nil)
         inFlight += 1
         // 待つ上限を決めていない命令が長く返らないときは残す。止まったまま戻らない不具合を追うため
         let started = Date()
@@ -118,7 +132,35 @@ public final class PTPCamera {
             let elapsed = Date().timeIntervalSince(started)
             if elapsed > 45 { log(String(format: "PTP %@ がようやく返った（%.0f 秒）", label, elapsed)) }
         }
-        return try await withCheckedThrowingContinuation { cont in
+        do {
+            let data = try await perform(op, params: params, outData: outData, timeout: timeout, label: label)
+            trace?(String(format: "%@ → OK %d バイト %.2f 秒", described, data.count, Date().timeIntervalSince(started)))
+            return data
+        } catch {
+            let elapsed = String(format: "%.2f 秒", Date().timeIntervalSince(started))
+            switch error {
+            case PTPError.response(let code):
+                trace?("\(described) → \(PTP.responseName(code)) \(elapsed)")
+            case PTPError.timedOut:
+                trace?("\(described) → 返事なし（\(elapsed)で打ち切り）")
+                if capabilities?.support == .basic {
+                    unresponsive = true
+                    log("\(described) に返事が無いので、以後は命令を送らない")
+                }
+            default:
+                trace?("\(described) → 失敗 \(error.localizedDescription) \(elapsed)")
+            }
+            throw error
+        }
+    }
+
+    private static func describe(_ op: PTP.Op, _ params: [UInt32]) -> String {
+        let args = params.map { String(format: "0x%X", $0) }.joined(separator: ",")
+        return String(format: "PTP 0x%04X", op.rawValue) + (args.isEmpty ? "" : "(\(args))")
+    }
+
+    private func perform(_ op: PTP.Op, params: [UInt32], outData: Data?, timeout: TimeInterval?, label: String) async throws -> Data {
+        try await withCheckedThrowingContinuation { cont in
             let once = Once()
             device.requestSendPTPCommand(PTP.command(op, params: params), outData: outData) { data, response, error in
                 guard once.claim() else { return }

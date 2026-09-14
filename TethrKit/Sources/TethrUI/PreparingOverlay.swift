@@ -7,13 +7,23 @@ import SwiftUI
 /// 固まって見えないよう画面全体で待っていることを伝える。
 /// アイコンと同じ絞り羽根がゆっくり回りながら開閉し、終わると全開になって本来の画面が現れる。
 public struct PreparingOverlay: View {
-    /// 前回このカメラで数えたカード内の件数
-    let count: Int?
+    let title: Text
+    let detail: Text?
+    let footer: Text?
     /// 準備が終わった時刻。ここから絞りを全開にして消える
     let reveal: Date?
 
+    /// - Parameter count: 前回このカメラで数えたカード内の件数
     public init(count: Int?, reveal: Date?) {
-        self.count = count
+        self.init(title: Text("カードを確認中"), detail: count.map { Text("カード内 \($0) 件") }, reveal: reveal)
+    }
+
+    /// 待っている中身を呼ぶ側が決める（Mac 版は、macOS がカメラを知らせてくるまでの待ちにも使う）
+    /// - Parameter footer: コマの下に小さく出す（経過時間など）
+    public init(title: Text, detail: Text?, footer: Text? = nil, reveal: Date? = nil) {
+        self.title = title
+        self.detail = detail
+        self.footer = footer
         self.reveal = reveal
     }
 
@@ -27,24 +37,27 @@ public struct PreparingOverlay: View {
                     .frame(width: 148, height: 148)
                     .padding(.bottom, 34)
 
-                Text("カードを確認中")
+                title
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
                     .padding(.bottom, 6)
 
                 // 残り時間は出さない。同じ枚数でも 7 秒で終わる回と 38 秒かかる回があり、
                 // 予想を出すと大きく外れる（「あと 1 秒」から 15 秒以上待たされた）
-                Group {
-                    if let count {
-                        Text("カード内 \(count) 件")
-                    } else {
-                        Text(" ")
-                    }
-                }
-                .font(.system(size: 13).monospacedDigit())
-                .foregroundStyle(Theme.dim)
-                .padding(.bottom, 22)
+                (detail ?? Text(" "))
+                    .font(.system(size: 13).monospacedDigit())
+                    .foregroundStyle(Theme.dim)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 22)
 
                 FilmFrames(time: timeline.date, lit: amber)
+
+                if let footer {
+                    footer
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Theme.dimmer)
+                        .padding(.top, 14)
+                }
 
                 Spacer()
             }

@@ -142,12 +142,13 @@ struct ReceiverBar: View {
 
 struct GeoTagView: View {
     @StateObject private var model = GeoTagModel()
-    @StateObject private var receiver = GeoReceiver()
+    /// 受信はアプリ全体で待ち受けている（カードからの取り込みでも同じ内容を使う）
+    @EnvironmentObject var geo: GeoStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
-            ReceiverBar(receiver: receiver)
+            ReceiverBar(receiver: geo.receiver)
 
             HStack(spacing: 10) {
                 sourceBox(
@@ -175,13 +176,16 @@ struct GeoTagView: View {
         }
         .padding(16)
         .frame(minWidth: 620, minHeight: 460)
-        .onAppear { receiver.start() }
-        .onDisappear { receiver.stop() }
-        .onChange(of: receiver.lastPayload?.generated) { _, _ in
+        .onAppear {
+            // 前に受け取った内容があれば、それで始める
+            if model.payload == nil, let payload = geo.payload {
+                model.adopt(payload, from: geo.sender ?? "iPhone")
+            }
+        }
+        .onChange(of: geo.receivedAt) { _, _ in
             // 届いたらそのまま採用する。ファイルを選び直す手間を省く。
-            guard case .received(let sender, _) = receiver.state,
-                  let payload = receiver.lastPayload else { return }
-            model.adopt(payload, from: sender)
+            guard let payload = geo.payload else { return }
+            model.adopt(payload, from: geo.sender ?? "iPhone")
         }
         .alert("エラー", isPresented: Binding(
             get: { model.problem != nil },

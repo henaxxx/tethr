@@ -19,8 +19,10 @@ final class CameraLink: NSObject {
     enum Phase: Equatable {
         /// セッションを開いていない（カメラが見えていても）
         case closed
-        /// 開きたいが、カメラが見つからない
+        /// 開きたいが、USB にカメラがいない
         case searching
+        /// USB には挿さっているが、ImageCaptureCore がまだ知らせてこない（電源を入れた直後、macOS がカードを下調べしている）
+        case detected(String, since: Date)
         case opening(String)
         /// セッションは開いたが、カードの下調べで命令が通らない
         case preparing(String)
@@ -38,8 +40,22 @@ final class CameraLink: NSObject {
     /// カメラが外れた、またはセッションが閉じた
     var onLost: ((String?) -> Void)?
     var onPTPEvent: ((PTPEvent) -> Void)?
-    var onFileSaved: ((URL) -> Void)?
+    /// テザーで撮ったカットを保存した
+    var onFileSaved: ((URL, ICCameraFile) -> Void)?
     var onDownloadFailed: ((String, String) -> Void)?
+    /// カード内のファイルが増えた、または一覧が出そろった（まとめて知らせる）
+    var onCardChanged: (() -> Void)?
+
+    /// カード内のファイル（フォルダ名/ファイル名で引く）。接続前からあったものも含む。
+    /// 番号が 9999 で一巡すると、別のフォルダに同じ名前のファイルが並ぶので、名前だけでは引かない
+    private(set) var cardFiles: [String: ICCameraFile] = [:]
+    /// 一覧が出そろった。完了の合図は先に来るので、ファイルの到着が途切れるまで待って決める
+    private(set) var cardSettled = false
+    /// 接続時点でカードにあったオブジェクトの数（フォルダを含む）。出そろったかの判定と、読み込み中の分母に使う
+    private(set) var cardExpected: Int?
+    private var frameworkCatalogDone = false
+    private var settleTask: Task<Void, Never>?
+    private var cardNotifyTask: Task<Void, Never>?
 
     /// 撮影ファイルの保存先
     var destination: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Tethr")
@@ -49,6 +65,7 @@ final class CameraLink: NSObject {
     private(set) var downloading = 0
 
     private let browser = ICDeviceBrowser()
+    private let usb = USBCameraWatcher()
     private var device: ICCameraDevice?
     /// 利用者がつなぎたいと言っている。カメラが後から現れたら開く
     private var wantsSession = false
@@ -72,7 +89,12 @@ final class CameraLink: NSObject {
             rawValue: ICDeviceTypeMask.camera.rawValue | ICDeviceLocationTypeMask.local.rawValue
         )!
         browser.start()
+        usb.onChange = { [weak self] in self?.usbChanged() }
+        usb.start()
     }
+
+    /// カメラが USB に現れた時刻（分かれば）。つながるまでの待ち時間を数える起点にする
+    var attachedSince: Date? { usb.camera?.since }
 
     var isReady: Bool {
         if case .ready = phase { return true }
@@ -84,8 +106,8 @@ final class CameraLink: NSObject {
     func open() {
         wantsSession = true
         guard let device else {
-            phase = .searching
-            Log.write("接続: カメラを探しています")
+            phase = waitingPhase
+            Log.write(usb.camera.map { "接続: USB に \($0.name) がいる。macOS の準備を待つ" } ?? "接続: カメラを探しています")
             return
         }
         guard !device.hasOpenSession else { return }
@@ -106,6 +128,16 @@ final class CameraLink: NSObject {
         }
     }
 
+    /// ImageCaptureCore のカメラがいないときの待ち方
+    private var waitingPhase: Phase {
+        usb.camera.map { .detected($0.name, since: $0.since) } ?? .searching
+    }
+
+    private func usbChanged() {
+        guard wantsSession, device == nil else { return }
+        phase = waitingPhase
+    }
+
     private func begin(_ device: ICCameraDevice) {
         Log.startSession()
         let name = device.name ?? String(localized: "カメラ")
@@ -124,6 +156,68 @@ final class CameraLink: NSObject {
         pendingFiles = []
         seenNames = []
         queue = []
+        cardFiles = [:]
+        cardSettled = false
+        cardExpected = nil
+        frameworkCatalogDone = false
+        settleTask?.cancel()
+        notifyCardChanged()
+    }
+
+    // MARK: カードの一覧
+
+    private func cardFilesArrived(_ files: [ICCameraFile]) {
+        for file in files {
+            guard let name = file.name else { continue }
+            cardFiles["\(file.parentFolder?.name ?? "")/\(name)"] = file
+        }
+        scheduleSettle()
+        notifyCardChanged()
+    }
+
+    /// 完了の合図のあと、ファイルの到着が途切れたら出そろったとみなす。
+    ///
+    /// 電源を入れた直後は、合図のあとも 0.1 秒おきにファイルが届き続ける。
+    /// 途切れただけで決めると、ほかの命令が割り込んで間が空いたときに早まる（6 件で「出そろった」になった）ので、
+    /// 接続時に数えたオブジェクト数（フォルダのぶん少し多い）にほぼ届くまでは待つ（iOS 版と同じ判定）。
+    /// 数えられなかったとき、数が合わないまま長く途切れたときは、時間で決める
+    private func scheduleSettle() {
+        guard frameworkCatalogDone, !cardSettled else { return }
+        settleTask?.cancel()
+        settleTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard let self, !Task.isCancelled else { return }
+            if let expected = self.cardExpected, self.cardFiles.count + 10 < expected {
+                // まだ届いていないはず。到着が止まったままなら、しばらく待ってから打ち切る
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled else { return }
+                Log.write("カードの一覧: \(expected) 件のうち \(self.cardFiles.count) 件で到着が止まった")
+            }
+            self.cardSettled = true
+            Log.write("カードの一覧が出そろった: \(self.cardFiles.count) 件（数えたオブジェクト \(self.cardExpected.map(String.init) ?? "?") 件）")
+            self.notifyCardChanged()
+        }
+    }
+
+    /// カード内のオブジェクトを数える（GetObjectHandles。全ストレージ・全形式・全階層）
+    private func countObjects(_ camera: PTPCamera) async {
+        guard let data = try? await camera.send(.getObjectHandles, params: [0xFFFF_FFFF, 0, 0]) else { return }
+        var r = PTPReader(data)
+        guard let n = r.read(UInt32.self) else { return }
+        cardExpected = Int(n)
+        Log.write("カード内のオブジェクト \(n) 件")
+        notifyCardChanged()
+    }
+
+    /// 1 件ずつ知らせると画面の描き直しが追いつかないので、0.3 秒ぶんまとめる
+    private func notifyCardChanged() {
+        guard cardNotifyTask == nil else { return }
+        cardNotifyTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let self else { return }
+            self.cardNotifyTask = nil
+            self.onCardChanged?()
+        }
     }
 
     // MARK: 接続後に撮ったカットか
@@ -162,20 +256,37 @@ final class CameraLink: NSObject {
 
     private func save(_ file: ICCameraFile) async {
         let name = file.name ?? "?"
+        switch await download(file, into: destination, deleteFromCard: deleteAfterDownload) {
+        case .success(let url):
+            savedFiles.insert("\(name)#\(file.fileSize)")
+            onFileSaved?(url, file)
+        case .failure(let reason):
+            // ここを黙って握り潰すと、撮ったコマが消えたことに誰も気づかない
+            fail(name, reason.message)
+        }
+    }
+
+    struct DownloadFailure: Error {
+        let message: String
+    }
+
+    /// カードのファイルを 1 つ、フォルダへ落とす。同名があれば連番を付ける。
+    /// テザーの保存とカードからの取り込みの両方で使う
+    func download(_ file: ICCameraFile, into directory: URL, deleteFromCard: Bool = false) async -> Result<URL, DownloadFailure> {
+        let name = file.name ?? "?"
         let fm = FileManager.default
         do {
-            try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         } catch {
-            fail(name, String(localized: "保存先を作成できません（\(destination.path)）: \(error.localizedDescription)"))
-            return
+            return .failure(DownloadFailure(message: String(localized: "保存先を作成できません（\(directory.path)）: \(error.localizedDescription)")))
         }
         // 同名衝突（カード入れ替えでファイル番号が巻き戻る等）を避ける
-        var target = destination.appendingPathComponent(name)
+        var target = directory.appendingPathComponent(name)
         let base = target.deletingPathExtension().lastPathComponent
         let ext = target.pathExtension
         var n = 1
         while fm.fileExists(atPath: target.path) {
-            target = destination.appendingPathComponent("\(base)-\(n).\(ext)")
+            target = directory.appendingPathComponent("\(base)-\(n).\(ext)")
             n += 1
         }
 
@@ -183,13 +294,12 @@ final class CameraLink: NSObject {
         defer { downloading -= 1 }
         let started = Date()
         var options: [ICDownloadOption: Any] = [
-            .downloadsDirectoryURL: destination,
+            .downloadsDirectoryURL: directory,
             .saveAsFilename: target.lastPathComponent,
             .overwrite: false,
         ]
-        if deleteAfterDownload { options[.deleteAfterSuccessfulDownload] = true }
+        if deleteFromCard { options[.deleteAfterSuccessfulDownload] = true }
 
-        let directory = destination
         let result: Result<URL, Error> = await withCheckedContinuation { cont in
             file.requestDownload(options: options) { filename, error in
                 if let error {
@@ -203,12 +313,10 @@ final class CameraLink: NSObject {
         case .success(let url):
             // ImageCaptureCore は 0600 で書き出す。libgphoto2 版と同じく、ほかのアカウントや NAS へのコピーでも読めるようにする
             try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
-            savedFiles.insert("\(name)#\(file.fileSize)")
             Log.write(String(format: "保存: %@ %.1f 秒", url.lastPathComponent, Date().timeIntervalSince(started)))
-            onFileSaved?(url)
+            return .success(url)
         case .failure(let error):
-            // ここを黙って握り潰すと、撮ったコマが消えたことに誰も気づかない
-            fail(name, String(localized: "保存できません（\(target.path)）: \(error.localizedDescription)"))
+            return .failure(DownloadFailure(message: String(localized: "保存できません（\(target.path)）: \(error.localizedDescription)")))
         }
     }
 
@@ -225,7 +333,11 @@ extension CameraLink: ICDeviceBrowserDelegate {
         Task { @MainActor in
             guard self.device == nil, let camera = device as? ICCameraDevice else { return }
             self.device = camera
-            Log.write("カメラを検出: \(camera.name ?? "?")")
+            if let since = self.usb.camera?.since {
+                Log.write(String(format: "カメラを検出: %@（USB に現れてから %.1f 秒）", camera.name ?? "?", Date().timeIntervalSince(since)))
+            } else {
+                Log.write("カメラを検出: \(camera.name ?? "?")")
+            }
             if self.wantsSession { self.begin(camera) }
         }
     }
@@ -235,9 +347,13 @@ extension CameraLink: ICDeviceBrowserDelegate {
             guard device === self.device else { return }
             Log.write("カメラが外れた")
             self.device = nil
-            let wasOpen = self.phase != .closed && self.phase != .searching
+            let wasOpen: Bool
+            switch self.phase {
+            case .closed, .searching, .detected: wasOpen = false
+            default: wasOpen = true
+            }
             self.resetSession()
-            self.phase = self.wantsSession ? .searching : .closed
+            self.phase = self.wantsSession ? self.waitingPhase : .closed
             if wasOpen { self.onLost?(String(localized: "カメラが取り外されました")) }
         }
     }
@@ -280,6 +396,7 @@ extension CameraLink: ICCameraDeviceDelegate {
             if let clock = await camera.cameraClock() {
                 self.clockDrift = Date().timeIntervalSince(clock)
             }
+            await self.countObjects(camera)
             Log.write(String(format: "準備完了 %.1f 秒（時計のずれ %@）", Date().timeIntervalSince(opened),
                              self.clockDrift.map { String(format: "%.1f 秒", $0) } ?? "不明"))
             guard self.camera === camera else { return }
@@ -314,6 +431,7 @@ extension CameraLink: ICCameraDeviceDelegate {
         let files = items.compactMap { $0 as? ICCameraFile }
         Task { @MainActor in
             guard camera === self.device, self.openedAt != nil else { return }
+            self.cardFilesArrived(files)
             if self.classifyReady {
                 self.ingest(files)
             } else {
@@ -331,7 +449,13 @@ extension CameraLink: ICCameraDeviceDelegate {
     }
 
     nonisolated func deviceDidBecomeReady(withCompleteContentCatalog device: ICCameraDevice) {
-        Task { @MainActor in Log.write("一覧の完了通知") }
+        Task { @MainActor in
+            guard device === self.device else { return }
+            Log.write("一覧の完了通知")
+            self.frameworkCatalogDone = true
+            // ファイルが 1 件も来ないカード（空）でも、ここから数え始めるので出そろったと判定できる
+            self.scheduleSettle()
+        }
     }
 
     nonisolated func cameraDevice(_ camera: ICCameraDevice, didRemove items: [ICCameraItem]) {}

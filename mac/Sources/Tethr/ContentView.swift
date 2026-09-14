@@ -16,9 +16,7 @@ struct ContentView: View {
             if model.destinationProblem != nil || !model.failedTransfers.isEmpty {
                 DestinationWarning()
             }
-            PreviewPane(zoom: zoom)
-            PreviewInfoRow(zoom: zoom)
-            Filmstrip()
+            MainArea(card: model.card, geo: model.geo, zoom: zoom)
         }
         .background(Theme.background)
         .foregroundStyle(Theme.text)
@@ -63,6 +61,26 @@ struct ContentView: View {
             Button("OK") { model.lastError = nil }
         } message: {
             Text(model.lastError ?? "")
+        }
+    }
+}
+
+/// 写真の欄と下の段。テザーの一覧とカードの一覧を切り替える
+private struct MainArea: View {
+    @EnvironmentObject var model: SessionModel
+    @ObservedObject var card: CardModel
+    @ObservedObject var geo: GeoStore
+    @ObservedObject var zoom: PreviewZoom
+
+    var body: some View {
+        if card.active && model.isConnected {
+            CardBrowser(card: card)
+            CardInfoRow(card: card)
+            CardActionBar(card: card, geo: geo)
+        } else {
+            PreviewPane(zoom: zoom)
+            PreviewInfoRow(zoom: zoom)
+            Filmstrip()
         }
     }
 }
@@ -128,13 +146,15 @@ struct CameraMenu: View {
                 Section {
                     Button("切断") { model.disconnect() }
                 }
+            } else if model.isWaiting {
+                Text(statusText)
+                Button("待つのをやめる") { model.disconnect() }
             } else {
                 Button("接続") { model.connect() }
-                    .disabled(model.state == .connecting)
             }
         } label: {
             // ツールバーのメニューは図形を落として文字だけ描くので、点も文字の一部として埋め込む
-            let dot = Text(Image(systemName: model.state == .connecting ? "circle.dotted" : "circle.fill"))
+            let dot = Text(Image(systemName: model.isWaiting ? "circle.dotted" : "circle.fill"))
                 .font(.system(size: 7))
                 .foregroundStyle(dotColor)
             Text("\(dot)  \(statusText)")
@@ -148,22 +168,32 @@ struct CameraMenu: View {
 
     /// つながらない理由。ツールバーには短く出し、詳しくはここと写真の欄に出す
     private var detail: String? {
-        if case .failed(let message) = model.state { return message }
-        return nil
+        switch model.state {
+        case .failed(let message): return message
+        case .waiting: return String(localized: "USB でつないで、カメラの電源を入れてください。見つかると自動でつながります")
+        case .connecting: return String(localized: "電源を入れた直後は、つながるまで 1 分ほどかかることがあります")
+        default: return nil
+        }
     }
 
     private var dotColor: Color {
         switch model.state {
-        case .connected: return Theme.amber
+        case .connected, .connecting: return Theme.amber
         case .failed: return Theme.danger
-        case .connecting, .disconnected: return Theme.dimmer
+        case .waiting, .disconnected: return Theme.dimmer
         }
     }
 
     private var statusText: String {
         switch model.state {
         case .connected(let m): return m
-        case .connecting: return model.preparing ? String(localized: "カードを確認中…") : String(localized: "接続中…")
+        case .waiting: return String(localized: "カメラを待っています")
+        case .connecting:
+            switch model.warmup {
+            case .system(let name)?: return String(localized: "\(name) を準備中…")
+            case .card?: return String(localized: "カードを確認中…")
+            case nil: return String(localized: "接続中…")
+            }
         case .failed, .disconnected: return String(localized: "未接続")
         }
     }
@@ -263,8 +293,8 @@ struct PreviewPane: View {
                 Theme.background
 
                 if model.preparing {
-                    // 電源を入れた直後は、カードの下調べが終わるまで何も通らない
-                    PreparingOverlay(count: nil, reveal: nil)
+                    // 電源を入れた直後は、macOS の準備とカードの下調べが終わるまで何も通らない
+                    WarmupOverlay()
                 } else if model.isLive {
                     if let frame = model.liveFrame {
                         Image(nsImage: frame)
@@ -299,6 +329,8 @@ struct PreviewPane: View {
                     } else {
                         ProgressView().controlSize(.regular)
                     }
+                } else if case .waiting(let note) = model.state {
+                    CameraWaitView(note: note)
                 } else {
                     VStack(spacing: 12) {
                         Image(systemName: "camera.aperture")
@@ -323,6 +355,7 @@ struct PreviewPane: View {
         case .connected: return String(localized: "カメラのシャッターを押すと、ここに表示されます")
         case .failed(let message): return message
         case .connecting: return String(localized: "接続中…")
+        case .waiting: return String(localized: "カメラを待っています")
         case .disconnected: return String(localized: "カメラを USB で接続してください")
         }
     }
@@ -488,6 +521,10 @@ struct Filmstrip: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            if model.isConnected {
+                SourceToggle(card: model.card)
+                    .padding(.leading, 14)
+            }
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 6) {
                     ForEach(model.shots) { shot in
@@ -555,7 +592,9 @@ struct ShootingInspector: View {
                         ExposureSection()
                         PictureSection()
                     } else {
-                        Text("カメラをつなぐと、ここで露出や画質を変えられます。")
+                        Text(model.state == .connecting
+                             ? LocalizedStringKey("つながると、ここで露出や画質を変えられます。")
+                             : LocalizedStringKey("カメラをつなぐと、ここで露出や画質を変えられます。"))
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.dim)
                             .fixedSize(horizontal: false, vertical: true)
@@ -589,9 +628,22 @@ private struct SectionHeader: View {
 private struct CameraSummary: View {
     @EnvironmentObject var model: SessionModel
 
+    private var title: String {
+        switch model.state {
+        case .connected(let name): return name
+        case .connecting:
+            switch model.warmup {
+            case .system(let name)?, .card(let name)?: return name
+            case nil: return String(localized: "接続中…")
+            }
+        case .waiting: return String(localized: "カメラを待っています")
+        case .failed, .disconnected: return String(localized: "未接続")
+        }
+    }
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(model.isConnected ? model.modelName : String(localized: "未接続"))
+            Text(title)
                 .font(.system(size: 20, weight: .semibold, design: .rounded))
                 .foregroundStyle(model.isConnected ? Theme.text : Theme.dim)
             Spacer()

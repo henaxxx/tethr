@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import AppKit
 import TethrKit
@@ -12,6 +13,8 @@ enum AFState: Equatable {
 
 enum ConnectionState: Equatable {
     case disconnected
+    /// つなぎたいが、USB にカメラがいない。挿されたら自動でつながる（外れた理由があれば添える）
+    case waiting(String?)
     case connecting
     case connected(String)
     case failed(String)
@@ -23,8 +26,17 @@ final class SessionModel: ObservableObject {
     // MARK: 状態
 
     @Published private(set) var state: ConnectionState = .disconnected
-    /// セッションは開いたが、カードの下調べが終わるまで命令が通らない（電源を入れた直後）
-    @Published private(set) var preparing = false
+    /// カメラは挿さっているが、まだ操作できない段階
+    enum Warmup: Equatable {
+        /// macOS がカメラを知らせてくるのを待っている（電源を入れた直後は 40 秒ほど）
+        case system(String)
+        /// セッションは開いたが、カードの下調べが終わるまで命令が通らない
+        case card(String)
+    }
+    @Published private(set) var warmup: Warmup?
+    /// 待ち始めた時刻（カメラが USB に現れた時刻が分かればそれ）。経過時間を出して、止まっていないと伝える
+    @Published private(set) var warmupSince: Date?
+    var preparing: Bool { warmup != nil }
     @Published private(set) var shots: [Shot] = []
     /// カメラが申告した設定（現在値・選択肢・書き込めるか）
     @Published private(set) var props: [PTP.Prop: PropDesc] = [:]
@@ -60,6 +72,13 @@ final class SessionModel: ObservableObject {
     @Published var autofocusBeforeShot: Bool { didSet { save() } }
 
     private let link = CameraLink()
+    /// iPhone から受け取った位置情報（アプリ全体で 1 つ）
+    let geo = GeoStore()
+    /// 取り込み済みの控え
+    private let ledger = ImportLedger()
+    /// カードの中身と取り込み
+    let card: CardModel
+    private var geoObservation: AnyCancellable?
     private var camera: PTPCamera? { link.camera }
     private var liveView: NikonLiveView?
     private var eventLoop: Task<Void, Never>?
@@ -83,6 +102,7 @@ final class SessionModel: ObservableObject {
         autoConnect = d.object(forKey: "autoConnect") as? Bool ?? true
         deleteAfterDownload = d.bool(forKey: "deleteAfterDownload")
         autofocusBeforeShot = d.object(forKey: "autofocusBeforeShot") as? Bool ?? true
+        card = CardModel(link: link, geo: geo, ledger: ledger)
 
         link.deleteAfterDownload = deleteAfterDownload
         applyDestination()
@@ -91,7 +111,21 @@ final class SessionModel: ObservableObject {
         link.onReady = { [weak self] camera in self?.cameraReady(camera) }
         link.onLost = { [weak self] reason in self?.cameraLost(reason) }
         link.onPTPEvent = { [weak self] event in self?.handle(event) }
-        link.onFileSaved = { [weak self] url in self?.fileSaved(url) }
+        link.onFileSaved = { [weak self] url, file in
+            guard let self else { return }
+            self.fileSaved(url)
+            // テザーで保存したカットも、カードの一覧では取り込み済みに見せる
+            self.ledger.record(serial: self.cameraSerial, name: file.name ?? url.lastPathComponent,
+                               size: Int64(file.fileSize), captured: file.creationDate)
+        }
+        link.onCardChanged = { [weak self] in self?.card.refresh() }
+        card.destination = { [weak self] date in
+            self?.destination(for: date) ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Tethr")
+        }
+        card.serial = { [weak self] in self?.cameraSerial ?? "?" }
+        geoObservation = geo.$payload.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
+            self?.card.geoChanged()
+        }
         #if DEBUG
         // 画面を詰めるとき用。起動引数 -loadShots <フォルダ> で、そのフォルダの NEF を一覧に並べる
         if let i = CommandLine.arguments.firstIndex(of: "-loadShots"), i + 1 < CommandLine.arguments.count {
@@ -99,6 +133,15 @@ final class SessionModel: ObservableObject {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for url in files.filter({ ["nef", "jpg"].contains($0.pathExtension.lowercased()) }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 fileSaved(url)
+            }
+        }
+        // -showCard でカードの一覧から始める。-openCard を足すと、一覧が届いたあと先頭の 1 枚を大きく出す
+        if CommandLine.arguments.contains("-showCard") { card.active = true }
+        if CommandLine.arguments.contains("-openCard") {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard let self, let first = self.card.items.first else { return }
+                self.card.open(first.id)
             }
         }
         #endif
@@ -120,11 +163,20 @@ final class SessionModel: ObservableObject {
     }
 
     /// 日付サブフォルダ設定を反映した実際の保存先。
-    var effectiveDestination: URL {
+    var effectiveDestination: URL { destination(for: Date()) }
+
+    /// その日に撮ったカットの保存先。カードから取り込むときは撮影日で分ける
+    func destination(for date: Date) -> URL {
         guard useDateSubfolder else { return baseDestination }
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd"
-        return baseDestination.appendingPathComponent(f.string(from: Date()))
+        return baseDestination.appendingPathComponent(f.string(from: date))
+    }
+
+    /// 取り込みの控えに使うカメラの識別
+    private var cameraSerial: String {
+        guard let serial = deviceInfo?.serialNumber ?? camera?.info?.serialNumber, !serial.isEmpty else { return modelName }
+        return serial
     }
 
     private func applyDestination() {
@@ -164,6 +216,14 @@ final class SessionModel: ObservableObject {
     var isConnected: Bool {
         if case .connected = state { return true }
         return false
+    }
+
+    /// カメラを待っている、またはつながる途中（自分から何もしなくてもつながる）
+    var isWaiting: Bool {
+        switch state {
+        case .waiting, .connecting: return true
+        default: return false
+        }
     }
 
     var modelName: String {
@@ -229,6 +289,7 @@ final class SessionModel: ObservableObject {
             eventLoop?.cancel()
             link.close()
             clearCameraState()
+            card.active = false
             state = .disconnected
         }
     }
@@ -237,20 +298,41 @@ final class SessionModel: ObservableObject {
         switch phase {
         case .closed:
             if case .connected = state { state = .disconnected }
-            preparing = false
+            endWarmup()
         case .searching:
-            state = .failed(String(localized: "カメラが見つかりません。USB 接続と電源を確認してください。"))
-            preparing = false
-        case .opening:
+            // 外れた直後なら、その理由を残したまま待つ
+            if case .waiting = state {} else { state = .waiting(nil) }
+            endWarmup()
+        case .detected(let name, _):
             state = .connecting
-            preparing = false
-        case .preparing:
+            beginWarmup(.system(name), since: recentAttach)
+        case .opening(let name):
             state = .connecting
-            preparing = true
+            beginWarmup(.system(name), since: recentAttach)
+        case .preparing(let name):
+            state = .connecting
+            beginWarmup(.card(name), since: recentAttach)
         case .ready(let name):
-            preparing = false
+            endWarmup()
             state = .connected(name)
         }
+    }
+
+    /// 電源を入れた直後の接続なら、USB に現れた時刻から数える。
+    /// 挿しっぱなしのカメラにアプリを開いてつなぐときは今から（数分前からの経過を出すと、長く待たせたように見える）
+    private var recentAttach: Date? {
+        link.attachedSince.flatMap { -$0.timeIntervalSinceNow < 180 ? $0 : nil }
+    }
+
+    private func beginWarmup(_ stage: Warmup, since: Date?) {
+        warmup = stage
+        // 段階が進んでも経過時間は数え直さない
+        if warmupSince == nil { warmupSince = since ?? Date() }
+    }
+
+    private func endWarmup() {
+        warmup = nil
+        warmupSince = nil
     }
 
     private func cameraReady(_ camera: PTPCamera) {
@@ -274,7 +356,13 @@ final class SessionModel: ObservableObject {
         liveView?.forget()
         eventLoop?.cancel()
         clearCameraState()
-        if let reason { state = .failed(reason) }
+        guard let reason else { return }
+        switch link.phase {
+        // 挿し直せば自動でつながるので、失敗ではなく待ちとして出す
+        case .searching: state = .waiting(reason)
+        case .detected: break
+        default: state = .failed(reason)
+        }
     }
 
     private func clearCameraState() {
@@ -290,7 +378,6 @@ final class SessionModel: ObservableObject {
         frameTimes = []
         lightMeter = nil
         bufferRemaining = nil
-        preparing = false
     }
 
     // MARK: 設定の読み書き

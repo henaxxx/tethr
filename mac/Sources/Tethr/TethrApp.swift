@@ -26,7 +26,7 @@ struct TethrApp: App {
                 Button("接続") { model.connect() }
                     .disabled(model.isConnected)
                 Button("切断") { model.disconnect() }
-                    .disabled(!model.isConnected)
+                    .disabled(!model.isConnected && !model.isWaiting)
                 Divider()
                 Button(model.isLive ? "ライブビューを止める" : "ライブビューを開始") {
                     model.toggleLiveView()
@@ -59,6 +59,7 @@ struct TethrApp: App {
 
         Window("位置情報を付与", id: "geotag") {
             GeoTagView()
+                .environmentObject(model.geo)
                 .tint(Theme.amber)
         }
         .defaultSize(width: 700, height: 520)

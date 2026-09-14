@@ -55,27 +55,38 @@ struct GeoWriter {
         var plan = Plan()
 
         for url in files {
-            let name = url.lastPathComponent
-            let captured = Self.captureDate(of: url)
-
             // すでに位置がある写真は、上書き指定が無い限り対象から外す
             if !overwriteExisting, Self.hasGPS(url) {
                 plan.alreadyTagged.append(url)
                 continue
             }
-            // 1. ファイル名で確定しているものを優先する
-            if let point = payload.shots[name] {
-                plan.matches.append(Match(url: url, point: point, exact: true, captured: captured, gap: nil))
-                continue
+            if let match = match(url) {
+                plan.matches.append(match)
+            } else {
+                plan.unmatched.append(url)
             }
-            // 2. 撮影時刻から軌跡上の最寄り点を探す
-            if let captured, let (point, gap) = nearestTrackPoint(to: captured), gap <= tolerance {
-                plan.matches.append(Match(url: url, point: point, exact: false, captured: captured, gap: gap))
-                continue
-            }
-            plan.unmatched.append(url)
         }
         return plan
+    }
+
+    /// 1 枚ぶんの突き合わせ。ファイル名で確定しているものを優先し、無ければ撮影時刻から軌跡上の最寄り点を探す
+    func match(_ url: URL) -> Match? {
+        let captured = Self.captureDate(of: url)
+        if let point = payload.shots[url.lastPathComponent] {
+            return Match(url: url, point: point, exact: true, captured: captured, gap: nil)
+        }
+        if let captured, let (point, gap) = nearestTrackPoint(to: captured), gap <= tolerance {
+            return Match(url: url, point: point, exact: false, captured: captured, gap: gap)
+        }
+        return nil
+    }
+
+    /// 取り込む前（カードの上）で、位置を付けられる見込みがあるか。
+    /// カードの撮影日時は EXIF と同じカメラの時計なので、同じ規則で判定できる
+    func canLocate(name: String, captured: Date?) -> Bool {
+        if payload.shots[name] != nil { return true }
+        guard let captured, let (_, gap) = nearestTrackPoint(to: captured) else { return false }
+        return gap <= tolerance
     }
 
     private func nearestTrackPoint(to date: Date) -> (GeoPoint, TimeInterval)? {

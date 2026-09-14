@@ -54,6 +54,8 @@ final class GeoReceiver: ObservableObject {
 
     @Published private(set) var state: State = .stopped
     @Published private(set) var lastPayload: GeoPayload?
+    /// 1 通受け取り終えた
+    var onReceive: ((GeoLink.Envelope) -> Void)?
 
     private var listener: NWListener?
     private var connections: [NWConnection] = []
@@ -144,6 +146,7 @@ final class GeoReceiver: ObservableObject {
                     let envelope = try GeoLink.decode(data)
                     self.lastPayload = envelope.payload
                     self.state = .received(envelope.sender, Date())
+                    self.onReceive?(envelope)
                     Log.write("位置情報を受信: \(envelope.sender) から "
                               + "shots \(envelope.payload.shots.count) / track \(envelope.payload.track.count)")
                     connection.send(content: Data("OK".utf8), completion: .contentProcessed { _ in

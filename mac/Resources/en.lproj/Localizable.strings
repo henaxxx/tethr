@@ -130,7 +130,6 @@
 
 /* ImageCaptureCore への移行（2026-09） */
 "カードを確認中…" = "Checking the card…";
-"カメラが見つかりません。USB 接続と電源を確認してください。" = "No camera found. Check the USB cable and that the camera is on.";
 "カメラが取り外されました" = "The camera was disconnected";
 "カメラに接続できません: %@" = "Could not connect to the camera: %@";
 "カメラとのやり取りは macOS 標準の仕組み（ImageCaptureCore）を通します。ほかのアプリを終了したり、ターミナルで操作したりする必要はありません。" = "Tethr talks to the camera through macOS’s own ImageCaptureCore. There is no need to quit other apps or use Terminal.";
@@ -192,9 +191,50 @@
 "%lld〜%lld%%" = "%lld–%lld%%";
 "カメラを USB で接続してください" = "Connect a camera over USB";
 "カメラをつなぐと、ここで露出や画質を変えられます。" = "Connect a camera to change exposure and quality here.";
+"つながると、ここで露出や画質を変えられます。" = "Once connected, you can change exposure and quality here.";
 "シャッター（スペース / ⌘T）" = "Shutter (Space / ⌘T)";
 "ミラーアップして映像を受け取ります（⌘L）" = "Raises the mirror and streams the image (⌘L)";
 "AF を実行（シャッター半押し相当、⌘F）" = "Autofocus, like a half-press (⌘F)";
 "連写であと何コマ撮れるか" = "Frames left in the camera’s buffer";
 "カードを確認中" = "Checking the card";
 "カード内 %lld 件" = "%lld files on the card";
+
+/* カードからの取り込み */
+"テザー %lld" = "Tethered %lld";
+"カード %lld" = "Card %lld";
+"カード 読込中" = "Card — loading";
+"カードに写真がありません" = "No photos on the card";
+"iPhone の記録から位置を付けられます" = "A location can be added from the iPhone’s record";
+"取り込み済み" = "Imported";
+"一覧へ戻る（Esc）" = "Back to the grid (Esc)";
+"位置を付けられます" = "Location available";
+"%lld 枚を選択中" = "%lld selected";
+"クリックで選択、⌘・⇧ で複数選択、ダブルクリックで大きく表示" = "Click to select, ⌘ or ⇧ to select several, double-click to view large";
+"選んだ %lld 枚を取り込む" = "Import %lld selected";
+"未取り込みをすべて取り込む（%lld）" = "Import all new (%lld)";
+"カードの一覧が出そろってから使えます" = "Available once the card has been read";
+"取り込み中 %lld / %lld" = "Importing %lld of %lld";
+"位置を書き込み中（%lld 枚）" = "Writing locations (%lld)";
+"カードを読み込み中 %lld 件" = "Reading the card: %lld files";
+"%lld 枚・未取り込み %lld 枚" = "%lld photos · %lld not imported";
+"取り込み時に書き込む" = "Write when importing";
+"位置情報なし。iPhone の Tethr から Mac へ送ると、取り込むときに書き込めます" = "No locations. Send them from Tethr on your iPhone to write them while importing";
+"%lld 枚を取り込みました" = "Imported %lld photos";
+"（位置を書き込んだのは %lld 枚）" = " (locations written to %lld)";
+"。%lld 枚は取り込めませんでした（%@）" = ". %lld could not be imported (%@)";
+"カードを読み込み中 %lld / %lld 件" = "Reading the card: %lld of %lld";
+"位置あり %lld 枚" = "%lld with location";
+"%@ から %@ に受け取った記録（正確な位置 %lld 件・軌跡 %lld 点）" = "Received from %@ on %@ (%lld exact locations, %lld track points)";
+
+/* 接続までの待ち */
+"カメラを待っています" = "Waiting for a camera";
+"USB でつないで、カメラの電源を入れてください。見つかると自動でつながります" = "Connect the camera over USB and turn it on. Tethr connects as soon as it appears";
+"%@ を準備しています" = "Getting %@ ready";
+"%@ を準備中…" = "Getting %@ ready…";
+"電源を入れた直後は、つながるまで 1 分ほどかかることがあります" = "Right after the camera is turned on, connecting can take about a minute";
+"時間がかかっています。つながらないときは、USB ケーブルを挿し直すか、カメラの電源を入れ直してください" = "This is taking a while. If the camera doesn’t connect, replug the USB cable or turn the camera off and on again";
+"待つのをやめる" = "Stop Waiting";
+"カードを読み込んでいます" = "Reading the card";
+"%lld / %lld 件" = "%lld of %lld";
+"%lld 件" = "%lld files";
+"読み終えると一覧を表示します" = "Photos appear once the card has been read";

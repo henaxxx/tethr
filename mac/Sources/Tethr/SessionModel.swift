@@ -80,7 +80,11 @@ final class SessionModel: ObservableObject {
     /// iPhone から受け取った位置情報（アプリ全体で 1 つ）
     let geo = GeoStore()
     /// 取り込み済みの控え
-    private let ledger = ImportLedger()
+    private let ledger = ImportLedger(
+        url: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Tethr/imported.json"),
+        log: { Log.write($0) }
+    )
     /// カードの中身と取り込み
     let card: CardModel
     private var geoObservation: AnyCancellable?
@@ -128,6 +132,10 @@ final class SessionModel: ObservableObject {
                                size: Int64(file.fileSize), captured: file.creationDate)
         }
         link.onCardChanged = { [weak self] in self?.card.refresh() }
+        // 控えは少し待ってまとめて書くので、終了の直前に書き出す
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.ledger.flush() }
+        }
         card.destination = { [weak self] date in
             self?.destination(for: date) ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures/Tethr")
         }

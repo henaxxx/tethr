@@ -93,6 +93,44 @@ main { padding: 0 clamp(1.25rem, 5vw, 2.5rem) 8rem; }
 }
 .hero .tag { margin: 0 auto; max-width: 30rem; color: var(--dim); font-size: clamp(1rem, 2.6vw, 1.1rem); }
 
+/* ── 画面の紹介 ───────────────────────── */
+/* iPhone と Mac を 1 枚ずつ、下を揃えて並べる。iPhone の枠は CSS で描き、Mac はウインドウの撮影そのまま */
+.screens {
+  display: flex; justify-content: center; align-items: flex-end;
+  gap: clamp(1.5rem, 4vw, 3rem);
+  /* 本文の幅（56rem）より広げて、MacBook の画面が読める大きさにする。画面の端からはみ出さない範囲で */
+  margin: 0 calc(50% - min(34rem, 50vw - clamp(1.25rem, 5vw, 2.5rem)));
+}
+.screens figure { margin: 0; }
+.screens figcaption {
+  margin-top: 1.1rem; text-align: center; color: var(--dim); font-size: .85rem; line-height: 1.5;
+}
+.screens figcaption strong { display: block; color: var(--text); font-weight: 600; font-size: .8rem; letter-spacing: .04em; }
+
+.phone { flex: 0 0 22%; max-width: 14.5rem; }
+/* 端末より説明のほうが長い。はみ出させて、Mac 側と行数を揃える（下の段の高さがずれると画面の下端が揃わない） */
+.phone figcaption { margin-inline: -5rem; }
+/* 枠の画像（450×920pt）の中で、画面（402×874pt）は左 24pt・上 23pt の位置にある */
+.phone .device { position: relative; }
+.phone .frame {
+  position: relative; z-index: 1; width: 100%; height: auto; vertical-align: top;
+  filter: drop-shadow(0 30px 40px rgba(0,0,0,.6));
+}
+.phone .screen { position: absolute; left: 5.333%; top: 2.5%; width: 89.333%; height: auto; }
+
+.mac { flex: 1 1 auto; max-width: 52rem; }
+/* 枠の画像（3860×2540px）の中で、画面（3024×1964px）は左 418px・上 288px の位置にある */
+.mac .device { position: relative; }
+.mac .frame { position: relative; z-index: 1; width: 100%; height: auto; vertical-align: top; }
+.mac .screen { position: absolute; left: 10.829%; top: 11.339%; width: 78.342%; height: auto; }
+
+@media (max-width: 40rem) {
+  .screens { flex-direction: column; align-items: center; gap: 2.5rem; }
+  .phone { flex: none; width: 58vw; max-width: 15rem; }
+  .phone figcaption { margin-inline: -3rem; }
+  .mac { flex: none; width: 100%; }
+}
+
 /* ── プラットフォームのカード ───────────── */
 .platforms { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; margin: 3rem 0 0; }
 @media (max-width: 40rem) { .platforms { grid-template-columns: 1fr; } }
@@ -185,4 +223,4 @@ html.lang-en .ja { display: none; }
 html:not(.lang-en) h2.sec { letter-spacing: .1em; }
 
 /* 文節で折り返す。日本語の途中改行を防ぐ */
-.hero .tag, .caption, .card p, .feat p, .note { word-break: auto-phrase; }
+.hero .tag, .caption, .card p, .feat p, .note, .phone figcaption { word-break: auto-phrase; }

@@ -38,8 +38,14 @@ public enum PTP {
     public enum Prop: UInt16, CaseIterable {
         case batteryLevel     = 0x5001
         case imageSize        = 0x5003
+        /// 画質（JPEG / NEF の組み合わせ）
+        case compressionSetting = 0x5004
         case whiteBalance     = 0x5005
         case fNumber          = 0x5007
+        /// 焦点距離（1/100 mm）
+        case focalLength      = 0x5008
+        /// フォーカスモード。D300 は本体のスイッチで決まり、書き換えられない
+        case focusMode        = 0x500A
         case exposureTime     = 0x500D
         case exposureProgram  = 0x500E
         case iso              = 0x500F
@@ -53,6 +59,9 @@ public enum PTP {
             switch self {
             case .batteryLevel:    return String(localized: "バッテリー")
             case .imageSize:       return String(localized: "画像サイズ")
+            case .compressionSetting: return String(localized: "画質")
+            case .focalLength:     return String(localized: "焦点距離")
+            case .focusMode:       return String(localized: "フォーカスモード")
             case .whiteBalance:    return String(localized: "WB")
             case .fNumber:         return String(localized: "絞り")
             case .exposureTime, .nikonExposureTime: return String(localized: "シャッター")

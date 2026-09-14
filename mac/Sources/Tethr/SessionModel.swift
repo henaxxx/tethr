@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import AppKit
+import TethrKit
 
 enum AFState: Equatable {
     case idle
@@ -22,17 +23,16 @@ final class SessionModel: ObservableObject {
     // MARK: 状態
 
     @Published private(set) var state: ConnectionState = .disconnected
+    /// セッションは開いたが、カードの下調べが終わるまで命令が通らない（電源を入れた直後）
+    @Published private(set) var preparing = false
     @Published private(set) var shots: [Shot] = []
-    @Published private(set) var settings: [String: String] = [:]
-    @Published private(set) var deviceInfo: [String: String] = [:]
-    @Published private(set) var choices: [String: [String]] = [:]
-    /// カメラが今この瞬間「書き込み不可」と申告している項目。
-    /// 露出モードで変わる（A なら shutterspeed、S なら f-number が固定される）。
-    @Published private(set) var readonlyKeys: Set<String> = []
+    /// カメラが申告した設定（現在値・選択肢・書き込めるか）
+    @Published private(set) var props: [PTP.Prop: PropDesc] = [:]
+    @Published private(set) var deviceInfo: DeviceInfo?
     @Published private(set) var lightMeter: Double?
     @Published private(set) var bufferRemaining: Int?
     @Published var selection: Shot.ID?
-    @Published var busy = false
+    @Published private(set) var busy = false
     @Published private(set) var afState: AFState = .idle
     @Published private(set) var isLive = false
     @Published private(set) var liveFrame: NSImage?
@@ -55,21 +55,22 @@ final class SessionModel: ObservableObject {
     @Published var baseDestination: URL { didSet { save(); applyDestination() } }
     @Published var useDateSubfolder: Bool { didSet { save(); applyDestination() } }
     @Published var autoConnect: Bool { didSet { save() } }
-    @Published var deleteAfterDownload: Bool { didSet { save(); engine.deleteAfterDownload = deleteAfterDownload } }
+    @Published var deleteAfterDownload: Bool { didSet { save(); link.deleteAfterDownload = deleteAfterDownload } }
+    /// シャッターの前に AF を走らせる（本体のシャッター全押しと同じ）
+    @Published var autofocusBeforeShot: Bool { didSet { save() } }
 
-    // MARK: 読み書きするカメラ設定のキー
-
-    static let dialKeys = ["shutterspeed", "f-number", "iso"]
-    static let menuKeys = ["whitebalance", "imagequality"]
-    static let editableKeys = dialKeys + menuKeys
-    static let liveKeys = editableKeys + ["expprogram", "batterylevel", "focallength",
-                                          "exposurecompensation", "focusmode", "autofocus"]
-    /// 選択肢を読むキー。露出モードと AF 設定もここに含める。
-    static let choiceKeys = editableKeys + ["expprogram", "autofocus"]
-    static let deviceKeys = ["serialnumber", "deviceversion", "lensname", "datetime"]
-
-    private let engine = CameraEngine()
+    private let link = CameraLink()
+    private var camera: PTPCamera? { link.camera }
+    private var liveView: NikonLiveView?
+    private var eventLoop: Task<Void, Never>?
+    /// CheckEvent が使えない機種（Nikon 1）は、USB のイベントと露出計の直読みに切り替える
+    private var checkEventUsable = true
+    /// 撮影通知（ObjectAdded）を受けた回数。ライブビュー中の撮影で、撮り終えたかの目安にする
+    private var shotNotifications = 0
+    /// 設定を書き込んでいる数。その間はコマ取りと問い合わせを休む
+    private var writing = 0
     private let thumbQueue = DispatchQueue(label: "app.tethr.thumb", qos: .userInitiated, attributes: .concurrent)
+    private let frameQueue = DispatchQueue(label: "app.tethr.liveframe", qos: .userInitiated)
 
     // MARK: 初期化
 
@@ -81,12 +82,21 @@ final class SessionModel: ObservableObject {
         useDateSubfolder = d.bool(forKey: "useDateSubfolder")
         autoConnect = d.object(forKey: "autoConnect") as? Bool ?? true
         deleteAfterDownload = d.bool(forKey: "deleteAfterDownload")
+        autofocusBeforeShot = d.object(forKey: "autofocusBeforeShot") as? Bool ?? true
 
-        engine.deleteAfterDownload = deleteAfterDownload
+        link.deleteAfterDownload = deleteAfterDownload
         applyDestination()
 
-        engine.onEvent = { [weak self] event in
-            Task { @MainActor in self?.handle(event) }
+        link.onPhase = { [weak self] phase in self?.phaseChanged(phase) }
+        link.onReady = { [weak self] camera in self?.cameraReady(camera) }
+        link.onLost = { [weak self] reason in self?.cameraLost(reason) }
+        link.onPTPEvent = { [weak self] event in self?.handle(event) }
+        link.onFileSaved = { [weak self] url in self?.fileSaved(url) }
+        link.onDownloadFailed = { [weak self] name, reason in
+            guard let self else { return }
+            self.failedTransfers.append(name)
+            self.destinationProblem = reason
+            self.lastError = String(localized: "「\(name)」を保存できませんでした。\n\(reason)\n\nカメラのカードには残っています。")
         }
     }
 
@@ -96,6 +106,7 @@ final class SessionModel: ObservableObject {
         d.set(useDateSubfolder, forKey: "useDateSubfolder")
         d.set(autoConnect, forKey: "autoConnect")
         d.set(deleteAfterDownload, forKey: "deleteAfterDownload")
+        d.set(autofocusBeforeShot, forKey: "autofocusBeforeShot")
     }
 
     /// 日付サブフォルダ設定を反映した実際の保存先。
@@ -107,7 +118,7 @@ final class SessionModel: ObservableObject {
     }
 
     private func applyDestination() {
-        engine.destination = effectiveDestination
+        link.destination = effectiveDestination
         destinationProblem = checkDestination()
     }
 
@@ -151,76 +162,281 @@ final class SessionModel: ObservableObject {
     }
 
     var batteryPercent: Int? {
-        Format.number(settings["batterylevel"]).map { Int($0) }
+        props[.batteryLevel].map { Int($0.current) }
     }
 
-    /// レンズ名。カメラが正式名称を返すときだけ表示する。
-    /// サードパーティ製レンズでは "Unknown value 00f5" のような
-    /// 識別子しか返らない。焦点距離と開放F値から組み立てることもできるが、
-    /// カメラの報告値は丸められていて実際のレンズ仕様と食い違うため出さない。
-    var lensDescription: String? {
-        let raw = deviceInfo["lensname"] ?? ""
-        guard !raw.isEmpty, !raw.lowercased().hasPrefix("unknown") else { return nil }
-        return raw
-    }
+    /// レンズ名は PTP では取れない（libgphoto2 でも "Unknown value 00f5" だった）。
+    /// 焦点距離の範囲と開放 F 値は読めるが、カメラの報告値は丸められていて実際のレンズ仕様と食い違うため出さない
+    var lensDescription: String? { nil }
 
     var currentFocalLength: String? {
-        settings["focallength"].map { Format.focal($0) }
+        props[.focalLength]?.currentText
+    }
+
+    /// シャッタースピードの設定。Nikon は正確な分数の独自プロパティを使う
+    var shutterProp: PTP.Prop {
+        (props[.nikonExposureTime]?.choices.isEmpty == false) ? .nikonExposureTime : .exposureTime
+    }
+
+    /// その項目をいま操作できるか。選択肢が取れていて、かつカメラが書き込めると言っていること。
+    /// 露出モードで変わる（A ならシャッター、S なら絞りが固定される）
+    func isWritable(_ prop: PTP.Prop) -> Bool {
+        guard isConnected, let desc = props[prop] else { return false }
+        return desc.writable && !desc.choices.isEmpty
+    }
+
+    /// 表示用の文字列で読み書きする（スクラバーやメニューは文字列の選択肢で動く）
+    func textBinding(for prop: PTP.Prop) -> Binding<String> {
+        Binding(
+            get: { self.props[prop]?.currentText ?? "" },
+            set: { text in
+                guard let desc = self.props[prop],
+                      let index = desc.choiceTexts.firstIndex(of: text) else { return }
+                self.setProp(prop, to: desc.choices[index])
+            }
+        )
     }
 
     // MARK: 接続
 
     func connect() {
-        guard !isConnected, state != .connecting else { return }
-        state = .connecting
         lastError = nil
         failedTransfers = []
         applyDestination()
-        engine.connect { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-                switch result {
-                case .success(let model):
-                    self.state = .connected(model)
-                    Log.write("保存先: \(self.effectiveDestination.path)")
-                    self.refreshSettings()
-                    self.refreshDeviceInfo()
-                    self.refreshChoices()
-                case .failure(let error):
-                    self.state = .failed(error.localizedDescription)
-                }
-            }
-        }
+        link.open()
     }
 
     func disconnect() {
-        engine.disconnect()
-        state = .disconnected
-        settings = [:]
-        deviceInfo = [:]
-        choices = [:]
-        readonlyKeys = []
+        Task {
+            if let liveView, liveView.isActive { await liveView.stop(reason: "切断") }
+            eventLoop?.cancel()
+            link.close()
+            clearCameraState()
+            state = .disconnected
+        }
+    }
+
+    private func phaseChanged(_ phase: CameraLink.Phase) {
+        switch phase {
+        case .closed:
+            if case .connected = state { state = .disconnected }
+            preparing = false
+        case .searching:
+            state = .failed(String(localized: "カメラが見つかりません。USB 接続と電源を確認してください。"))
+            preparing = false
+        case .opening:
+            state = .connecting
+            preparing = false
+        case .preparing:
+            state = .connecting
+            preparing = true
+        case .ready(let name):
+            preparing = false
+            state = .connected(name)
+        }
+    }
+
+    private func cameraReady(_ camera: PTPCamera) {
+        deviceInfo = camera.info
+        checkEventUsable = camera.capabilities?.isNikon1 != true
+        if camera.isNikon, camera.capabilities?.isNikon1 != true {
+            let live = NikonLiveView(camera: camera, cameraIdentifier: camera.info?.serialNumber ?? "?")
+            live.onChange = { [weak self] in self?.liveViewChanged() }
+            live.onFrame = { [weak self] jpeg in self?.showFrame(jpeg) }
+            live.shouldPauseFrames = { [weak self] in (self?.writing ?? 0) > 0 }
+            liveView = live
+        }
+        clockOffset = link.clockDrift
+        Task {
+            await refreshAll()
+            startEventLoop()
+        }
+    }
+
+    private func cameraLost(_ reason: String?) {
+        liveView?.forget()
+        eventLoop?.cancel()
+        clearCameraState()
+        if let reason { state = .failed(reason) }
+    }
+
+    private func clearCameraState() {
+        liveView = nil
+        props = [:]
+        deviceInfo = nil
         afState = .idle
         isLive = false
+        busy = false
         clockOffset = nil
         liveFrame = nil
         liveFPS = 0
         frameTimes = []
         lightMeter = nil
         bufferRemaining = nil
+        preparing = false
+    }
+
+    // MARK: 設定の読み書き
+
+    private func refreshAll() async {
+        guard let camera else { return }
+        props = await camera.describeAll()
+        await refreshCounters()
+        let dump = props.keys.sorted { $0.rawValue < $1.rawValue }
+            .map { "\($0.label)=\(props[$0]!.currentText)\(props[$0]!.writable ? "" : "🔒")" }
+            .joined(separator: " ")
+        Log.write("設定: \(dump)")
+    }
+
+    private func refreshCounters() async {
+        guard let camera, camera.isNikon else { return }
+        lightMeter = await camera.lightMeter()
+        bufferRemaining = await camera.integer(PTPCamera.maximumShotsCode).map { Int($0) }
+    }
+
+    private func refresh(_ prop: PTP.Prop) async {
+        guard let camera, let desc = await camera.describe(prop) else { return }
+        props[prop] = desc
+    }
+
+    /// 本体側で変わった設定を読み直す（⌘R）
+    func refreshSettings() {
+        Task { await refreshAll() }
+    }
+
+    func setProp(_ prop: PTP.Prop, to value: Int64) {
+        guard let camera, let desc = props[prop], value != desc.current else { return }
+        writing += 1
+        Task {
+            defer { writing -= 1 }
+            do {
+                try await camera.write(desc, value: value)
+                // 露出モードを変えると、書き込める項目がまとめて入れ替わる
+                if prop == .exposureProgram { await refreshAll() } else { await refresh(prop) }
+            } catch {
+                // 露出モードの変更などでは、設定は通っているのに応答が遅れてエラーになることがある。
+                // 失敗扱いにする前に読み直し、狙った値になっていれば成功とみなす（libgphoto2 版と同じ扱い）
+                try? await Task.sleep(for: .milliseconds(400))
+                await refresh(prop)
+                if props[prop]?.current == value {
+                    Log.write("  \(prop.label) の書き込み: エラー応答だが値は反映済み")
+                } else {
+                    lastError = String(localized: "\(prop.label) を変更できませんでした: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    // MARK: 本体側の変化
+
+    /// 変化が続いている間は細かく、静かになったら間隔を空ける（iOS 版と同じ考え方）
+    private func startEventLoop() {
+        eventLoop?.cancel()
+        eventLoop = Task { [weak self] in
+            var quiet = 0
+            while !Task.isCancelled {
+                let interval: Duration = quiet > 12 ? .milliseconds(2000) : quiet > 4 ? .milliseconds(900) : .milliseconds(350)
+                try? await Task.sleep(for: interval)
+                guard let self, let camera = self.camera, self.isConnected else { return }
+                // 撮影中、保存中、設定の書き込み中は叩かない
+                if self.busy || self.writing > 0 || self.link.downloading > 0 { continue }
+                let changed = await self.pollOnce(camera)
+                quiet = changed ? 0 : quiet + 1
+            }
+        }
+    }
+
+    private func pollOnce(_ camera: PTPCamera) async -> Bool {
+        guard checkEventUsable else {
+            let before = lightMeter
+            lightMeter = await camera.lightMeter()
+            return before != lightMeter
+        }
+        let events: [PTPEvent]
+        do {
+            events = try await camera.checkEvent()
+        } catch PTPError.response(0x2005) {
+            checkEventUsable = false
+            Log.write("CheckEvent 非対応。露出計を直接読む方式に切り替え")
+            return false
+        } catch {
+            return false
+        }
+        let changed = Set(events.filter { $0.code == PTPEvent.devicePropChanged }.map { UInt16(truncatingIfNeeded: $0.param) })
+        guard !changed.isEmpty else { return false }
+        if changed.contains(UInt16(PTPCamera.lightMeterCode)) {
+            lightMeter = await camera.lightMeter()
+        }
+        if changed.contains(UInt16(PTPCamera.maximumShotsCode)) {
+            bufferRemaining = await camera.integer(PTPCamera.maximumShotsCode).map { Int($0) }
+        }
+        if changed.contains(PTP.Prop.exposureProgram.rawValue) {
+            await refreshAll()
+        } else {
+            for prop in PTP.Prop.allCases where changed.contains(prop.rawValue) {
+                await refresh(prop)
+            }
+        }
+        return true
+    }
+
+    private func handle(_ event: PTPEvent) {
+        switch event.code {
+        case PTPEvent.objectAdded:
+            shotNotifications += 1
+        case PTPEvent.captureComplete:
+            Task { await refreshCounters() }
+        case PTPEvent.devicePropChanged where !checkEventUsable:
+            if let prop = PTP.Prop(rawValue: UInt16(truncatingIfNeeded: event.param)) {
+                Task { prop == .exposureProgram ? await refreshAll() : await refresh(prop) }
+            }
+        default:
+            break
+        }
     }
 
     // MARK: 操作
 
-    func shoot() {
-        guard isConnected, !busy else { return }
-        busy = true
-        engine.triggerCapture { [weak self] error in
-            Task { @MainActor in
-                guard let self else { return }
-                self.busy = false
-                if let error { self.lastError = error.localizedDescription }
+    /// 撮影通知を待つ上限。長秒時ノイズ低減では露光と同じ時間だけ処理が続くので、露光時間の 2 倍に余裕を足す
+    private var captureWaitSeconds: Double {
+        var exposure = 1.0
+        if let value = props[.nikonExposureTime]?.current {
+            let raw = UInt32(truncatingIfNeeded: value)
+            if raw >= 0xFFFF_FFFD {
+                exposure = 60
+            } else if raw & 0xFFFF != 0 {
+                exposure = Double(raw >> 16) / Double(raw & 0xFFFF)
             }
+        }
+        return 15 + exposure * 2
+    }
+
+    func shoot() {
+        guard isConnected, !busy, let camera else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            let autofocus = autofocusBeforeShot
+            let release: () async -> Bool = {
+                if autofocus { _ = await camera.autofocus() }
+                do {
+                    try await camera.releaseShutter()
+                    return true
+                } catch {
+                    self.lastError = String(localized: "撮影できませんでした: \(error.localizedDescription)")
+                    return false
+                }
+            }
+            if let liveView, liveView.state == .on {
+                // ライブビューをいったん止め、記録先をカードに戻してから普段どおりに切る
+                if let problem = await liveView.whileSuspended(shotCount: { self.shotNotifications },
+                                                               waitSeconds: captureWaitSeconds, release) {
+                    lastError = problem
+                }
+            } else {
+                _ = await release()
+            }
+            await refreshCounters()
         }
     }
 
@@ -229,30 +445,59 @@ final class SessionModel: ObservableObject {
     /// 点けっぱなしはセンサーの発熱とバッテリー消費につながる。
     func toggleLiveView() {
         guard isConnected else { return }
-        let turnOn = !isLive
-        engine.setLiveView(turnOn) { [weak self] error in
-            Task { @MainActor in
+        guard let liveView else {
+            lastError = String(localized: "この機種ではライブビューを使えません。")
+            return
+        }
+        Task {
+            if liveView.isActive {
+                await liveView.stop(reason: "ボタン")
+            } else if let problem = await liveView.start() {
+                lastError = problem
+            }
+        }
+    }
+
+    private func liveViewChanged() {
+        guard let liveView else { return }
+        isLive = liveView.state != .off
+        if liveView.state == .off {
+            liveFrame = nil
+            liveFPS = 0
+            frameTimes = []
+        }
+    }
+
+    /// JPEG の展開はメインスレッドの外で済ませる。表示が追いつかないうちは次のコマを積まない
+    private var frameInFlight = false
+    private func showFrame(_ jpeg: Data) {
+        guard !frameInFlight else { return }
+        frameInFlight = true
+        frameQueue.async {
+            let image = NSImage(data: jpeg)
+            image?.cgImage(forProposedRect: nil, context: nil, hints: nil)   // ここで展開させる
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                if let error {
-                    self.lastError = error.localizedDescription
-                    return
-                }
-                self.isLive = turnOn
-                if !turnOn {
-                    self.liveFrame = nil
-                    self.liveFPS = 0
-                    self.frameTimes = []
-                }
+                self.frameInFlight = false
+                guard self.isLive, let image else { return }
+                self.liveFrame = image
+                let now = Date()
+                self.frameTimes.append(now)
+                self.frameTimes.removeAll { now.timeIntervalSince($0) > 1 }
+                self.liveFPS = self.frameTimes.count
             }
         }
     }
 
     /// カメラ本体に制御権を返す（上面液晶の PC 表示を解除する）。
     func releaseCameraControl() {
-        guard isConnected else { return }
-        engine.releaseCameraControl { [weak self] error in
-            Task { @MainActor in
-                if let error { self?.lastError = error.localizedDescription }
+        guard isConnected, let camera else { return }
+        Task {
+            do {
+                try await camera.send(.nikonChangeCameraMode, params: [0])
+                Log.write("制御権を本体へ返却")
+            } catch {
+                lastError = error.localizedDescription
             }
         }
     }
@@ -260,17 +505,14 @@ final class SessionModel: ObservableObject {
     /// カメラの内蔵時計を Mac に合わせる。
     /// ずれたままだと撮影ファイルすべての EXIF 時刻が狂う。
     func syncClock() {
-        guard isConnected else { return }
-        let now = Int(Date().timeIntervalSince1970)
-        engine.writeConfig("datetime", value: String(now)) { [weak self] error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    self.lastError = error.localizedDescription
-                } else {
-                    self.clockOffset = 0
-                    Log.write("カメラ時計を Mac に合わせました")
-                }
+        guard isConnected, let camera else { return }
+        Task {
+            do {
+                try await camera.setCameraClock(Date())
+                clockOffset = 0
+                Log.write("カメラ時計を Mac に合わせました")
+            } catch {
+                lastError = error.localizedDescription
             }
         }
     }
@@ -292,21 +534,18 @@ final class SessionModel: ObservableObject {
 
     /// AF を走らせる。シャッター半押しに相当。
     func autofocus() {
-        guard isConnected, afState != .running else { return }
+        guard isConnected, afState != .running, let camera else { return }
         afState = .running
-        engine.driveAutofocus { [weak self] error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    self.afState = .failed(error.localizedDescription)
-                } else {
-                    self.afState = .succeeded
-                }
-                self.refreshSettings()
-                // 結果表示は一時的なもの。少し見せてから消す。
-                try? await Task.sleep(for: .seconds(2))
-                if self.afState != .running { self.afState = .idle }
+        Task {
+            switch await camera.autofocus() {
+            case true?: afState = .succeeded
+            case false?: afState = .failed(String(localized: "ピントが合いませんでした"))
+            case nil: afState = .failed(String(localized: "AF を実行できませんでした"))
             }
+            await refreshCounters()
+            // 結果表示は一時的なもの。少し見せてから消す。
+            try? await Task.sleep(for: .seconds(2))
+            if afState != .running { afState = .idle }
         }
     }
 
@@ -314,88 +553,6 @@ final class SessionModel: ObservableObject {
     var afFailureDetail: String? {
         if case .failed(let message) = afState { return message }
         return nil
-    }
-
-    /// シャッター時にカメラが AF を行うか
-    var autofocusOnCapture: Binding<Bool> {
-        Binding(
-            get: { self.settings["autofocus"] == "On" },
-            set: { self.setSetting("autofocus", to: $0 ? "On" : "Off") }
-        )
-    }
-
-    func refreshSettings() {
-        guard isConnected else { return }
-        engine.readConfig(Self.liveKeys) { [weak self] cfg, readonly in
-            Task { @MainActor in
-                self?.settings.merge(cfg) { _, new in new }
-                self?.readonlyKeys = readonly
-            }
-        }
-    }
-
-    private func refreshDeviceInfo() {
-        engine.readConfig(Self.deviceKeys) { [weak self] cfg, _ in
-            Task { @MainActor in
-                self?.deviceInfo = cfg
-                // 時計のずれは読んだ瞬間に確定させる。あとで計算すると
-                // 経過時間ぶんだけ誤差が乗る。
-                if let raw = cfg["datetime"], let epoch = Double(raw) {
-                    self?.clockOffset = Date().timeIntervalSince1970 - epoch
-                }
-                let dump = Self.deviceKeys.map { "\($0)=\(cfg[$0] ?? "―")" }.joined(separator: " ")
-                Log.write("機器情報: \(dump)")
-                if let lens = self?.lensDescription { Log.write("レンズ表記: \(lens)") }
-            }
-        }
-    }
-
-    private func refreshChoices() {
-        engine.readChoices(Self.choiceKeys) { [weak self] ch in
-            Task { @MainActor in
-                self?.choices = ch
-                // 選択肢が取れないとダイヤルは無効表示になる。
-                // 撮影モードによっては絞りやシャッターが固定される点に注意。
-                let dump = Self.choiceKeys.map { "\($0)=\(ch[$0]?.count ?? 0)" }.joined(separator: " ")
-                Log.write("選択肢の件数: \(dump)")
-                for key in Self.dialKeys {
-                    guard let list = ch[key], !list.isEmpty else { continue }
-                    Log.write("  \(key) 先頭: \(list.prefix(6).joined(separator: " | "))")
-                }
-            }
-        }
-    }
-
-    func setSetting(_ key: String, to value: String) {
-        guard isConnected else { return }
-        let previous = settings[key]
-        settings[key] = value
-        engine.writeConfig(key, value: value) { [weak self] error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    self.settings[key] = previous
-                    self.lastError = error.localizedDescription
-                } else {
-                    self.refreshSettings()
-                    // 露出モードを変えると、変更できる項目そのものが入れ替わる
-                    if key == "expprogram" { self.refreshChoices() }
-                }
-            }
-        }
-    }
-
-    /// その項目をいま操作できるか。
-    /// 選択肢が取れていて、かつカメラが読み取り専用と言っていないこと。
-    func isWritable(_ key: String) -> Bool {
-        isConnected && !(choices[key] ?? []).isEmpty && !readonlyKeys.contains(key)
-    }
-
-    func binding(for key: String) -> Binding<String> {
-        Binding(
-            get: { self.settings[key] ?? "" },
-            set: { self.setSetting(key, to: $0) }
-        )
     }
 
     func revealInFinder(_ shot: Shot) {
@@ -426,46 +583,13 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    // MARK: イベント処理
+    // MARK: 撮影ファイル
 
-    private func handle(_ event: CameraEvent) {
-        switch event {
-        case .fileArrived(let url):
-            let shot = Shot(url: url, arrived: Date())
-            shots.insert(shot, at: 0)
-            selection = shot.id
-            loadThumbnail(for: shot.id, url: url)
-            refreshSettings()
-
-        case .property(let key, let value):
-            switch key {
-            case "lightmeter":
-                lightMeter = Double(value).map { $0 / 6.0 }
-            case "maximumshots":
-                bufferRemaining = Double(value).map { Int($0) }
-            default:
-                if Self.liveKeys.contains(key) { settings[key] = value }
-                if Self.deviceKeys.contains(key) { deviceInfo[key] = value }
-            }
-
-        case .downloadFailed(let name, let reason):
-            failedTransfers.append(name)
-            destinationProblem = reason
-            lastError = String(localized: "「\(name)」を保存できませんでした。\n\(reason)\n\nカメラのカードには残っています。")
-
-        case .previewFrame(let image):
-            liveFrame = image
-            let now = Date()
-            frameTimes.append(now)
-            frameTimes.removeAll { now.timeIntervalSince($0) > 1 }
-            liveFPS = frameTimes.count
-
-        case .captureComplete:
-            busy = false
-
-        case .disconnected(let why):
-            state = .failed(why)
-        }
+    private func fileSaved(_ url: URL) {
+        let shot = Shot(url: url, arrived: Date())
+        shots.insert(shot, at: 0)
+        selection = shot.id
+        loadThumbnail(for: shot.id, url: url)
     }
 
     private func loadThumbnail(for id: Shot.ID, url: URL) {

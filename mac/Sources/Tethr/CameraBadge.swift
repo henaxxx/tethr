@@ -9,7 +9,7 @@ struct CameraBadge: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(model.modelName)
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
-                if let fw = model.deviceInfo["deviceversion"] {
+                if let fw = model.deviceInfo?.version, !fw.isEmpty {
                     Text(fw)
                         .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -20,7 +20,7 @@ struct CameraBadge: View {
                 Spacer()
             }
 
-            if let serial = model.deviceInfo["serialnumber"] {
+            if let serial = model.deviceInfo?.serialNumber, !serial.isEmpty {
                 Text("S/N \(serial)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)

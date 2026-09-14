@@ -22,11 +22,9 @@ SOFTWARE.
 
 ---
 
-This project links against and, in its distributed macOS build, bundles
-libgphoto2 and related libraries, which are licensed under the GNU Lesser
-General Public License version 2.1. Those libraries remain under their own
-licence; see mac/bundle-libs.sh for how the bundle is assembled, and the
-Licenses folder inside the built application for the full text.
+The distributed macOS build bundles ExifTool by Phil Harvey, licensed under the
+same terms as Perl (GPL v1+ or the Artistic License).
 
-The distributed macOS build also bundles ExifTool by Phil Harvey, licensed
-under the same terms as Perl (GPL v1+ or the Artistic License).
+macOS release 1.0 also linked against and bundled libgphoto2 and related
+libraries, licensed under the GNU Lesser General Public License version 2.1.
+Later versions no longer use them.

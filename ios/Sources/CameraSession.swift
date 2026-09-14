@@ -338,7 +338,9 @@ final class CameraSession: NSObject, ObservableObject {
     /// DeviceInfo に露出まわりの設定が 1 つも載っていない（J1 は電池と時計だけ）
     var cannotAdjustSettings: Bool {
         guard isConnected, let caps = capabilities else { return false }
-        return !(PTP.Prop.allCases.contains { $0 != .batteryLevel && caps.properties.contains($0.rawValue) })
+        // 画質・焦点距離・フォーカスモードは見るだけの項目なので数えない
+        let exposure: [PTP.Prop] = [.exposureProgram, .exposureTime, .nikonExposureTime, .fNumber, .iso, .exposureBias, .whiteBalance]
+        return !exposure.contains { caps.properties.contains($0.rawValue) }
     }
 
     /// 露出計（Nikon 0xD1B1）を読めるか

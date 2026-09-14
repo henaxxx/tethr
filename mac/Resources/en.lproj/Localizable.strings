@@ -33,12 +33,6 @@
 "接続状態" = "Connection";
 "カメラ" = "Camera";
 "起動時にカメラへ自動接続する" = "Connect to the camera on launch";
-"接続時、macOS の ptpcamerad は自動で退避します。ターミナル操作は不要です。" = "Tethr steps macOS’s ptpcamerad aside automatically. No Terminal needed.";
-"カメラが接続されていません。" = "No camera is connected.";
-"カメラが見つかりません。USB 接続と電源を確認してください。(%@)" = "No camera found. Check the USB connection and power. (%@)";
-"カメラが応答しません。USB ポートをリセットして再試行します。(%@)" = "The camera is not responding. Resetting the USB port and retrying. (%@)";
-"USB を掴めません。macOS の ptpcamerad が握ったままの可能性があります。(%@)" = "Cannot claim the USB device. macOS’s ptpcamerad may still be holding it. (%@)";
-"libgphoto2 のドライバが見つかりません。アプリを入れ直してください。" = "The libgphoto2 drivers are missing. Please reinstall the app.";
 
 /* 撮影 */
 "撮影設定" = "Exposure";
@@ -133,3 +127,52 @@
 "上面液晶の PC 表示を解除し、本体側の操作を有効にします" = "Clears the PC indicator and re-enables the camera’s own controls";
 "ドラッグ・ホイール・矢印キーで選択" = "Drag, scroll, or use the arrow keys";
 "接続に失敗したときは %@ に原因が残ります。" = "If connecting fails, the reason is recorded in %@.";
+
+/* ImageCaptureCore への移行（2026-09） */
+"カードを確認中…" = "Checking the card…";
+"カメラが見つかりません。USB 接続と電源を確認してください。" = "No camera found. Check the USB cable and that the camera is on.";
+"カメラが取り外されました" = "The camera was disconnected";
+"カメラに接続できません: %@" = "Could not connect to the camera: %@";
+"カメラとのやり取りは macOS 標準の仕組み（ImageCaptureCore）を通します。ほかのアプリを終了したり、ターミナルで操作したりする必要はありません。" = "Tethr talks to the camera through macOS’s own ImageCaptureCore. There is no need to quit other apps or use Terminal.";
+"保存先を作成できません（%@）: %@" = "Cannot create the destination (%@): %@";
+"保存できません（%@）: %@" = "Cannot save (%@): %@";
+"%@ を変更できませんでした: %@" = "Could not change %@: %@";
+"撮影できませんでした: %@" = "Could not take the shot: %@";
+"この機種ではライブビューを使えません。" = "Live view is not available on this camera.";
+"ピントが合いませんでした" = "Could not focus";
+"AF を実行できませんでした" = "Could not run autofocus";
+"カメラが接続されていません" = "No camera is connected";
+"カメラが応答しました: %@" = "The camera replied: %@";
+"カメラから返事がありません（%@）" = "No reply from the camera (%@)";
+"応答なし" = "No response";
+"バッテリー" = "Battery";
+"画像サイズ" = "Image size";
+"フォーカスモード" = "Focus mode";
+"マクロ" = "Macro";
+
+/* ホワイトバランス */
+"マニュアル" = "Manual";
+"オート" = "Auto";
+"ワンタッチ" = "One-push";
+"晴天" = "Daylight";
+"蛍光灯" = "Fluorescent";
+"電球" = "Tungsten";
+"フラッシュ" = "Flash";
+"曇天" = "Cloudy";
+"日陰" = "Shade";
+"色温度" = "Color temperature";
+"プリセット" = "Preset";
+"オフ" = "Off";
+"自然光オート" = "Natural light auto";
+
+/* ライブビューを始められないとき */
+"ライブビューを開始できませんでした。レリーズモードダイヤルが Lv になっていないか確認してください。" = "Live view could not start. Check that the release mode dial is not set to Lv.";
+"ライブビューを開始できませんでした（%@）。レリーズモードダイヤルが Lv になっていないか確認してください。" = "Live view could not start (%@). Check that the release mode dial is not set to Lv.";
+"カメラの電池が足りないため、ライブビューを開始できません。" = "The camera battery is too low for live view.";
+"カメラの温度が上がっているため、ライブビューを開始できません。しばらく休ませてください。" = "The camera is too warm for live view. Let it cool down for a while.";
+"カードを確認してください（入っていない、書き込み禁止、エラー、未フォーマットのいずれか）。" = "Check the card: it may be missing, locked, faulty or unformatted.";
+"撮影モードを P・A・S・M のいずれかにしてください。" = "Set the shooting mode to P, A, S or M.";
+"バルブではライブビューを使えません。" = "Live view is not available in bulb.";
+"シャッターボタンが押されたままです。" = "The shutter button is being held down.";
+"ミラーアップ中はライブビューを使えません。" = "Live view is not available during mirror-up.";
+"記録先をカードに戻せなかったため、撮影をやめました。" = "The shot was cancelled because the recording destination could not be switched back to the card.";

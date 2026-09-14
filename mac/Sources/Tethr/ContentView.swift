@@ -1,4 +1,5 @@
 import SwiftUI
+import TethrKit
 
 struct ContentView: View {
     @EnvironmentObject var model: SessionModel
@@ -177,7 +178,7 @@ struct StatusBar: View {
     private var statusText: String {
         switch model.state {
         case .connected(let m): return m
-        case .connecting: return String(localized: "接続中…")
+        case .connecting: return model.preparing ? String(localized: "カードを確認中…") : String(localized: "接続中…")
         case .failed(let e): return e
         case .disconnected: return String(localized: "未接続")
         }
@@ -532,52 +533,28 @@ struct ShootingInspector: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
 
-                    if let modes = model.choices["expprogram"], !modes.isEmpty {
-                        Picker("", selection: model.binding(for: "expprogram")) {
-                            ForEach(modes, id: \.self) { Text($0).tag($0) }
+                    if let mode = model.props[.exposureProgram], !mode.choices.isEmpty {
+                        Picker("", selection: model.textBinding(for: .exposureProgram)) {
+                            ForEach(mode.choiceTexts, id: \.self) { Text($0).tag($0) }
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .disabled(!model.isWritable("expprogram"))
+                        .disabled(!model.isWritable(.exposureProgram))
                         .help("露出モード")
-                    } else if let mode = model.settings["expprogram"] {
-                        Text(mode)
+                    } else if let mode = model.props[.exposureProgram] {
+                        Text(mode.currentText)
                             .font(.system(size: 10, weight: .bold, design: .rounded))
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
                     }
 
                     VStack(spacing: 10) {
-                        ScrubberControl(title: "シャッター",
-                                        options: model.choices["shutterspeed"] ?? [],
-                                        format: Format.shutter,
-                                        selection: model.binding(for: "shutterspeed"),
-                                        enabled: model.isWritable("shutterspeed"),
-                                        locked: model.readonlyKeys.contains("shutterspeed"))
-                        ScrubberControl(title: "絞り",
-                                        options: model.choices["f-number"] ?? [],
-                                        format: Format.aperture,
-                                        selection: model.binding(for: "f-number"),
-                                        enabled: model.isWritable("f-number"),
-                                        locked: model.readonlyKeys.contains("f-number"))
-                        ScrubberControl(title: "ISO",
-                                        options: model.choices["iso"] ?? [],
-                                        format: Format.iso,
-                                        selection: model.binding(for: "iso"),
-                                        enabled: model.isWritable("iso"),
-                                        locked: model.readonlyKeys.contains("iso"))
+                        scrubber("シャッター", model.shutterProp)
+                        scrubber("絞り", .fNumber)
+                        scrubber("ISO", .iso)
+                        scrubber("露出補正", .exposureBias)
                     }
                     .padding(.top, 2)
-
-                    if let ec = model.settings["exposurecompensation"] {
-                        HStack {
-                            Text("露出補正").font(.system(size: 11)).foregroundStyle(.secondary)
-                            Spacer()
-                            Text(Format.exposureCompensation(ec))
-                                .font(.system(size: 11, weight: .medium).monospacedDigit())
-                        }
-                        .padding(.top, 2)
-                    }
                 }
                 .padding(12)
                 .background(
@@ -591,21 +568,20 @@ struct ShootingInspector: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
 
-                    if let mode = model.settings["focusmode"] {
+                    if let mode = model.props[.focusMode] {
                         HStack {
                             Text("モード").font(.system(size: 11)).foregroundStyle(.secondary)
                             Spacer()
-                            Text(mode).font(.system(size: 11, weight: .medium))
+                            Text(mode.currentText).font(.system(size: 11, weight: .medium))
                             Image(systemName: "lock.fill")
                                 .font(.system(size: 8)).foregroundStyle(.tertiary)
                                 .help("本体の AF モードスイッチで切り替えます")
                         }
                     }
 
-                    Toggle("シャッター時に AF する", isOn: model.autofocusOnCapture)
+                    Toggle("シャッター時に AF する", isOn: $model.autofocusBeforeShot)
                         .font(.system(size: 11))
                         .controlSize(.small)
-                        .disabled(!model.isWritable("autofocus"))
 
                     Button {
                         model.autofocus()
@@ -624,13 +600,13 @@ struct ShootingInspector: View {
                 )
 
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(SessionModel.menuKeys, id: \.self) { key in
-                        if let options = model.choices[key], !options.isEmpty {
-                            Picker(Self.labels[key] ?? key, selection: model.binding(for: key)) {
-                                ForEach(options, id: \.self) { Text($0).tag($0) }
+                    ForEach([PTP.Prop.whiteBalance, .compressionSetting], id: \.self) { prop in
+                        if let desc = model.props[prop], !desc.choices.isEmpty {
+                            Picker(Self.labels[prop] ?? prop.label, selection: model.textBinding(for: prop)) {
+                                ForEach(desc.choiceTexts, id: \.self) { Text($0).tag($0) }
                             }
                             .controlSize(.small)
-                            .disabled(!model.isWritable(key))
+                            .disabled(!model.isWritable(prop))
                         }
                     }
                 }
@@ -641,8 +617,17 @@ struct ShootingInspector: View {
         }
     }
 
-    static var labels: [String: String] {
-        ["whitebalance": String(localized: "WB"),
-         "imagequality": String(localized: "画質")]
+    static var labels: [PTP.Prop: String] {
+        [.whiteBalance: String(localized: "WB"),
+         .compressionSetting: String(localized: "画質")]
+    }
+
+    private func scrubber(_ title: LocalizedStringKey, _ prop: PTP.Prop) -> some View {
+        ScrubberControl(title: title,
+                        options: model.props[prop]?.choiceTexts ?? [],
+                        format: { $0 },
+                        selection: model.textBinding(for: prop),
+                        enabled: model.isWritable(prop),
+                        locked: model.props[prop].map { !$0.writable } ?? false)
     }
 }

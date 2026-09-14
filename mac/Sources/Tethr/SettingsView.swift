@@ -20,7 +20,7 @@ private struct GeneralSettings: View {
             Section {
                 Toggle("起動時にカメラへ自動接続する", isOn: $model.autoConnect)
             } footer: {
-                Text("接続時、macOS の ptpcamerad は自動で退避します。ターミナル操作は不要です。")
+                Text("カメラとのやり取りは macOS 標準の仕組み（ImageCaptureCore）を通します。ほかのアプリを終了したり、ターミナルで操作したりする必要はありません。")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
 
@@ -29,10 +29,10 @@ private struct GeneralSettings: View {
                 if let lens = model.lensDescription {
                     LabeledContent("レンズ", value: lens)
                 }
-                if let serial = model.deviceInfo["serialnumber"] {
+                if let serial = model.deviceInfo?.serialNumber, !serial.isEmpty {
                     LabeledContent("シリアル番号", value: serial)
                 }
-                if let fw = model.deviceInfo["deviceversion"] {
+                if let fw = model.deviceInfo?.version, !fw.isEmpty {
                     LabeledContent("ファームウェア", value: fw)
                 }
                 HStack {

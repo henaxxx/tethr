@@ -18,7 +18,7 @@ Written over two days in September 2026 against the camera the author owns.
 | | |
 |---|---|
 | Tested camera | Nikon D300 (2007) |
-| macOS | 26.0+ — built, signed, notarised, shipping |
+| macOS | 26.0+ — 1.0 (libgphoto2) shipping; `main` now uses ImageCaptureCore |
 | iOS | 17.0+ — submitted, awaiting review |
 
 Other PTP cameras will likely manage file listing, previews and import. Remote
@@ -29,29 +29,31 @@ most useful thing anyone could contribute.
 ## Layout
 
 ```
-mac/     Swift Package. Links libgphoto2 directly from Swift.
-ios/     xcodegen project. Raw PTP over ImageCaptureCore, no gphoto2.
-probe/   A bare harness for firing arbitrary PTP opcodes at a camera from iOS.
+TethrKit/  Swift package shared by both apps: PTP packets, property
+           descriptors, NEF parsing, Nikon live view, per-model safety rules.
+mac/       Swift Package. Raw PTP over ImageCaptureCore, via TethrKit.
+ios/       xcodegen project. Raw PTP over ImageCaptureCore, via TethrKit.
+probe/     A bare harness for firing arbitrary PTP opcodes at a camera from iOS.
 ios/store/site/   The website, deployed to Cloudflare Pages.
 ```
 
-The two apps share no code. They reach the camera by completely different
-routes, and that is the interesting part of this repository.
+Both apps reach the camera the same way and share that layer. Until September
+2026 the Mac app drove libgphoto2 instead; version 1.0 still does, and what that
+route cost is kept below.
 
 ## Building
 
 **macOS**
 
 ```sh
-brew install libgphoto2 pkg-config
+brew install exiftool          # only to bundle it; geotag writing uses it
 cd mac && swift build          # development
-./build.sh                     # bundle dependencies into Tethr.app
+./build.sh                     # assemble and sign Tethr.app
 ./build.sh release             # notarise and staple (needs a Developer ID)
 ```
 
-`bundle-libs.sh` copies libgphoto2, its camlibs and iolibs, the transitive
-dylibs and ExifTool into the bundle and rewrites the install names, so the
-shipped app does not depend on Homebrew.
+`build.sh` copies ExifTool (a Perl script) into the bundle, so writing
+locations into NEF files does not depend on Homebrew. Nothing else is bundled.
 
 **iOS**
 
@@ -68,24 +70,39 @@ anything for you.
 
 ## How it works
 
-**macOS** drives libgphoto2 from a serial dispatch queue that owns the
-`Camera` pointer, pumping `gp_camera_wait_for_event` at 200 ms (1 ms during
-live view). Everything that touches libgphoto2's type-unsafe widget API goes
-through a small C shim in `mac/Sources/CGPhoto/`.
+Both apps open the camera with ImageCaptureCore. It offers no remote shutter
+worth using (`ICCameraDevice.requestTakePicture` is unavailable on iOS), but
+`requestSendPTPCommand` accepts raw opcodes on iOS 13+ and macOS 10.15+, so
+TethrKit builds PTP packets by hand: `PTP.swift` is the container format,
+`PropDesc.swift` parses device property descriptors so the exposure scrubbers
+are driven by what the camera actually reports rather than a hardcoded table,
+`NEF.swift` walks the TIFF IFDs of a RAW file to find the embedded full-size
+JPEG, `NikonLiveView.swift` holds the live view sequence, and
+`CameraCapabilities` refuses opcodes known to hang Nikon 1 bodies.
 
-**iOS** cannot use libgphoto2, and `ICCameraDevice.requestTakePicture` is
-marked unavailable on the platform. But `requestSendPTPCommand` accepts raw
-opcodes, so the app builds PTP packets by hand: `PTP.swift` is the container
-format, `PropDesc.swift` parses device property descriptors so the exposure
-scrubbers are driven by what the camera actually reports rather than a
-hardcoded table, and `NEF.swift` walks the TIFF IFDs of a RAW file to find the
-embedded full-size JPEG and fetches only those bytes.
+**macOS** downloads every frame shot after connecting into the destination
+folder. **iOS** leaves the RAW on the card and reads only the embedded JPEG,
+importing to Photos on request.
 
 ## What cost the most time
 
 Recorded here so that the next person does not have to rediscover it.
 
 **macOS**
+
+- Raw PTP through ImageCaptureCore behaves as it does on iOS: properties,
+  capture, `ObjectAdded`/`CaptureComplete` events, downloads and live view
+  (25 fps on a D300) all worked unchanged.
+- `ptpcamerad` keeps the card catalogue while the camera stays attached, so a
+  new session — even from a freshly launched app — is ready in milliseconds.
+  After a camera power cycle commands block for about 40 s, and the "catalogue
+  complete" callback fires before the files trickle in (about 10 a second).
+- Downloads land with mode 0600. Set them back to 0644 if anything else will
+  read them.
+- Never start a subprocess from a SwiftUI computed property. It runs on every
+  body evaluation and starves the main thread.
+
+**macOS 1.0, libgphoto2**
 
 - `ptpcamerad` and `icdd` grab the USB device first. Kill them before opening
   the camera. SIP will not let you unload them via launchctl.
@@ -100,15 +117,13 @@ Recorded here so that the next person does not have to rediscover it.
   Write `controlmode=0` to return it, or the body stays locked.
 - `capturetarget` defaults to internal RAM: shots never reach the card, arrive
   named `capt0000.nef`, and never appear on the camera's own screen.
-- Never start a subprocess from a SwiftUI computed property. It runs on every
-  body evaluation and starves the main thread.
 
 **iOS**
 
 - ImageCaptureCore *is* available on iOS (13.2+), and raw PTP commands *do* go
   through. Reports to the contrary are about older releases.
-- Live view and `ChangeCameraMode` (0x9008) are the exceptions: the responses
-  are swallowed.
+- Nikon's `ChangeCameraMode` is 0x90C2; 0x9008 is `DeleteProfile`. With the
+  right opcode, live view works.
 - Property-change events never arrive. Poll `NIKON_CheckEvent` (0x90C7) and
   widen the interval when nothing changes.
 - The framework enumerates the entire card with `GetObjectInfo` at session
@@ -149,8 +164,8 @@ See [the privacy policy](https://tethr.pages.dev/privacy).
 
 ## Licence
 
-MIT, except for the third-party libraries the macOS build bundles —
-libgphoto2 and friends under LGPL-2.1, ExifTool under the Perl licence.
+MIT, except for ExifTool, which the macOS build bundles under the Perl licence.
+Mac 1.0 also bundled libgphoto2 and friends under LGPL-2.1.
 See [LICENSE](LICENSE).
 
 ---
@@ -166,13 +181,13 @@ See [LICENSE](LICENSE).
 取り込みは動く見込みですが、リモート操作はメーカー独自のコマンドに依存します。
 お持ちの機種で試した結果を Issue に投げていただけると、それが一番助かります。
 
-構成は `mac/`（libgphoto2 を Swift から直接リンク）、`ios/`（ImageCaptureCore
-経由で生の PTP を組み立てる。gphoto2 は使っていません）、`probe/`（任意の PTP
-オペコードをカメラに投げる実験用）の3つです。2つのアプリはコードを共有せず、
-まったく別の経路でカメラに到達しています。
+構成は `TethrKit/`（両アプリ共通の、生の PTP を組み立てる部品）、`mac/`、`ios/`、
+`probe/`（任意の PTP オペコードをカメラに投げる実験用）です。Mac 版も iOS 版も
+ImageCaptureCore 経由で生の PTP 命令を送り、その部分を TethrKit で共有しています。
+2026 年 9 月までの Mac 版（1.0）は libgphoto2 を使っていました。
 
 ビルド手順と、実装中に時間を溶かした落とし穴は、上の英語セクションに全部書いて
 あります。とくに「What cost the most time」は、同じことをやる人には役に立つはずです。
 
-ライセンスは MIT です。macOS 版が同梱する libgphoto2 は LGPL-2.1、ExifTool は
-Perl ライセンスのまま、それぞれの条件に従います。
+ライセンスは MIT です。macOS 版が同梱する ExifTool は Perl ライセンスのまま、
+その条件に従います（Mac 版 1.0 が同梱していた libgphoto2 は LGPL-2.1）。

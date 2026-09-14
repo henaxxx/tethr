@@ -11,7 +11,6 @@ cd "$(dirname "$0")"
 
 APP="Tethr.app"
 VERSION="1.0"
-ENTITLEMENTS="Resources/Tethr.entitlements"
 
 # 署名 ID。指定が無ければ手元にあるものを自動で拾う。
 if [ -z "${SIGN_ID:-}" ]; then
@@ -57,9 +56,6 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "▸ libgphoto2 の同梱"
-./bundle-libs.sh "$APP"
-
 echo "▸ 翻訳の同梱"
 # SwiftUI は文字列リテラルをそのまま翻訳キーにするため、
 # 日本語が基準言語で、en.lproj に対訳を置けば切り替わる。
@@ -93,40 +89,22 @@ fi
 
 echo "▸ ライセンス表記の同梱"
 mkdir -p "$APP/Contents/Resources/Licenses"
-for f in /opt/homebrew/Cellar/libgphoto2/*/COPYING; do
-    if [ -f "$f" ]; then cp "$f" "$APP/Contents/Resources/Licenses/libgphoto2-LGPL-2.1.txt"; break; fi
-done
 cat > "$APP/Contents/Resources/Licenses/README.txt" <<LIC
-Tethr は以下のライブラリを動的リンクで利用しています。
+Tethr は以下を同梱しています。
 
-  libgphoto2 / libgphoto2_port   LGPL-2.1-or-later   http://www.gphoto.org/
-  libusb                         LGPL-2.1-or-later   https://libusb.info/
-  libexif                        LGPL-2.1-or-later   https://libexif.github.io/
-  libltdl (GNU libtool)          LGPL-2.1-or-later   https://www.gnu.org/software/libtool/
-  libintl (GNU gettext)          LGPL-2.1-or-later   https://www.gnu.org/software/gettext/
-  libjpeg                        IJG License
-  ExifTool                       Artistic / GPL (Perl と同じ条件)  https://exiftool.org
+  ExifTool   Artistic / GPL (Perl と同じ条件)  https://exiftool.org
 
 ExifTool は Perl スクリプトとして Contents/Resources/exiftool に同梱しており、
 スクリプトそのものがソースコードです。
 
-これらは Contents/Frameworks および Contents/PlugIns に同梱されており、
-利用者が改変版に差し替えられるよう、ライブラリ検証を無効にして署名しています。
-各ライブラリのソースは上記の配布元から入手できます。
+カメラとのやり取りは macOS の ImageCaptureCore を使っており、ほかのライブラリは同梱していません。
 LIC
 
 echo "▸ 署名: $SIGN_ID"
 SIGN_ARGS=(--force --timestamp --options runtime --sign "$SIGN_ID")
 [ "$SIGN_ID" = "-" ] && SIGN_ARGS=(--force --sign "-")
 
-# 内側から順に署名する。先に親を署名すると中身の変更で無効になる。
-for f in "$APP/Contents/Frameworks"/*.dylib \
-         "$APP/Contents/PlugIns/camlibs"/*.so \
-         "$APP/Contents/PlugIns/iolibs"/*.so; do
-    [ -f "$f" ] || continue
-    codesign "${SIGN_ARGS[@]}" "$f" >/dev/null 2>&1
-done
-codesign "${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS" "$APP"
+codesign "${SIGN_ARGS[@]}" "$APP"
 
 echo "▸ 検証"
 codesign --verify --deep --strict --verbose=1 "$APP" 2>&1 | tail -2 || true

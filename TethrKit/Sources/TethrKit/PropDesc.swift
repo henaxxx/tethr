@@ -167,6 +167,35 @@ public enum PropFormat {
 
         case .imageSize:
             return "\(value)"
+
+        case .compressionSetting:
+            // Nikon の並び（libgphoto2 の compressionsetting 表と同じ）。D300 は 8 通り
+            switch (vendor, value) {
+            case (vendorNikon, 0): return "JPEG Basic"
+            case (vendorNikon, 1): return "JPEG Normal"
+            case (vendorNikon, 2): return "JPEG Fine"
+            case (vendorNikon, 3): return "TIFF (RGB)"
+            case (vendorNikon, 4): return "NEF (RAW)"
+            case (vendorNikon, 5): return "NEF + Basic"
+            case (vendorNikon, 6): return "NEF + Normal"
+            case (vendorNikon, 7): return "NEF + Fine"
+            default: return "\(value)"
+            }
+
+        case .focalLength:
+            let mm = Double(value) / 100
+            return mm == mm.rounded() ? "\(Int(mm))mm" : String(format: "%.1fmm", mm)
+
+        case .focusMode:
+            switch value {
+            case 1: return "MF"
+            case 2: return "AF"
+            case 3: return String(localized: "マクロ")
+            case 0x8010 where vendor == vendorNikon: return "AF-S"
+            case 0x8011 where vendor == vendorNikon: return "AF-C"
+            case 0x8012 where vendor == vendorNikon: return "AF-A"
+            default: return String(format: "0x%04X", UInt16(truncatingIfNeeded: value))
+            }
         }
     }
 

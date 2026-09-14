@@ -66,6 +66,7 @@ struct ContentView: View {
             updatePreparingOverlay()
         }
         .task {
+            Interaction.installOnWindows()
             #if DEBUG
             if CameraSession.demoRequested {
                 session.loadDemo()
@@ -416,7 +417,7 @@ struct PreviewInfoRow: View {
     var body: some View {
         HStack(spacing: 0) {
             if live.state != .off {
-                LiveStatus(feed: live.feed, state: live.state, shooting: live.suspended)
+                LiveStatus(feed: live.feed, state: live.state, shooting: live.suspended, autoStopIn: live.autoStopIn)
             } else if let shot {
                 HStack(spacing: 6) {
                     Text(shot.name)

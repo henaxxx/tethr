@@ -476,7 +476,6 @@ final class CameraSession: NSObject, ObservableObject {
             DebugLog.write("DeviceInfo を解釈できない（\(data.count) バイト）")
             return
         }
-        supportedProperties = info.properties
         capabilities = CameraCapabilities(info)
         #if DEBUG
         func hex(_ codes: [UInt16]) -> String { codes.map { String(format: "%04X", $0) }.joined(separator: " ") }
@@ -539,79 +538,6 @@ final class CameraSession: NSObject, ObservableObject {
         return DeviceInfo(vendor: vendor, manufacturer: manufacturer, model: string() ?? "",
                           operations: operations, events: events, properties: properties)
     }
-
-    /// カメラが対応を名乗っているプロパティ（DeviceInfo）
-    private var supportedProperties: [UInt16] = []
-    #if DEBUG
-    private var dumpedProperties = false
-
-    /// 調査用。対応しているプロパティの値をすべてログに残す（起動ごとに 1 回）。
-    /// 電池残量は 0x5001 が 20% 刻みでしか返らない（本体メニュー 42% のとき 60）ので、
-    /// 1% 単位の残量を持つプロパティが他にないか探す。載っている 206 件には無かった
-    private func dumpPropertyValuesOnce() async {
-        guard !dumpedProperties, !supportedProperties.isEmpty else { return }
-        dumpedProperties = true
-        var all = supportedProperties
-        if capabilities?.isNikon1 == true {
-            // Nikon 1 は独自プロパティを 0xF000 番台に持つ（libgphoto2 は J5 で 0xF01C まで確認）
-            all += (0xF000...0xF01C).map { UInt16($0) }.filter { !supportedProperties.contains($0) }
-        }
-        if let d = try? await send(.nikonGetVendorPropCodes) {
-            // uint32 個数 → uint16 の並び
-            let b = [UInt8](d)
-            if b.count >= 4 {
-                let n = Int(UInt32(b[0]) | UInt32(b[1]) << 8 | UInt32(b[2]) << 16 | UInt32(b[3]) << 24)
-                for k in 0..<n where 4 + 2 * k + 1 < b.count {
-                    all.append(UInt16(b[4 + 2 * k]) | UInt16(b[5 + 2 * k]) << 8)
-                }
-            }
-        }
-        DebugLog.write("プロパティ値: 標準 \(supportedProperties.count) 件 + 独自 \(all.count - supportedProperties.count) 件")
-        var line: [String] = []
-        func flush() {
-            if !line.isEmpty { DebugLog.write("プロパティ値: " + line.joined(separator: " ")) }
-            line = []
-        }
-        for prop in all {
-            guard isConnected else { return }
-            line.append(String(format: "%04X=", prop) + (await propertyValueText(prop) ?? "×"))
-            if line.count == 12 { flush() }
-        }
-        flush()
-
-        // 一覧に載っていない番号も読むだけ試す（読み取りのみで設定は変わらない）。
-        // 本体メニューの電池残量（1% 単位）が隠れていないかを見るため。1 回やれば十分なので覚えておく
-        let scanKey = "unlistedPropertyScan.v1"
-        guard !UserDefaults.standard.bool(forKey: scanKey) else { return }
-        let listed = Set(all)
-        let candidates = Array(0x5000...0x50FF) + Array(0xD000...0xD4FF)
-        let started = Date()
-        var found = 0
-        DebugLog.write("未掲載プロパティの走査を開始（\(candidates.count) 件）")
-        for code in candidates.map({ UInt16($0) }) where !listed.contains(code) {
-            guard isConnected else { return }
-            if let text = await propertyValueText(code) {
-                found += 1
-                line.append(String(format: "%04X=", code) + text)
-                if line.count == 12 { flush() }
-            }
-        }
-        flush()
-        UserDefaults.standard.set(true, forKey: scanKey)
-        DebugLog.write(String(format: "未掲載プロパティの走査を終了: 応答 %d 件、%.1f 秒", found, Date().timeIntervalSince(started)))
-    }
-
-    private func propertyValueText(_ prop: UInt16) async -> String? {
-        guard let d = try? await send(.getDevicePropValue, params: [UInt32(prop)]) else { return nil }
-        let b = [UInt8](d)
-        if [1, 2, 4].contains(b.count) {
-            return "\(b.enumerated().reduce(UInt32(0)) { $0 | UInt32($1.element) << (8 * $1.offset) })"
-        } else if b.count <= 24 {
-            return b.map { String(format: "%02X", $0) }.joined()
-        }
-        return "(\(b.count)B)"
-    }
-    #endif
 
     /// 接続時点のオブジェクト数を数えて、次回の目安として覚えておく
     private func countObjects() async {
@@ -957,6 +883,10 @@ final class CameraSession: NSObject, ObservableObject {
         #endif
         let changed = Self.changedProperties(in: data)
         guard !changed.isEmpty else { return false }
+        // 本体のダイヤルやボタンで設定が変わった＝カメラを触っている。露出計の揺れだけは数えない
+        if changed.contains(where: { $0 != UInt16(Self.lightMeterProp) }) {
+            Interaction.touch()
+        }
 
         if changed.contains(UInt16(Self.lightMeterProp)) {
             await readLightMeter()
@@ -1864,9 +1794,6 @@ extension CameraSession: ICCameraDeviceDelegate {
                 DebugLog.write("CheckEvent と露出計の問い合わせは使わない（Nikon 1）")
             }
             await self.refreshProps()
-            #if DEBUG
-            await self.dumpPropertyValuesOnce()
-            #endif
         }
     }
 

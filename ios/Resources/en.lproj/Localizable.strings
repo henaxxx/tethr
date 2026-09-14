@@ -128,5 +128,6 @@
 "露出計" = "Meter";
 "保存済み" = "Saved";
 "取り込み中" = "Importing";
+"%lld 秒で停止" = "Stops in %lld s";
 "全画面" = "Full screen";
 "閉じる" = "Close";

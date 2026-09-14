@@ -15,7 +15,9 @@ struct TethrTouchApp: App {
                     session.setPollingSuspended(phase != .active)
                     switch phase {
                     case .background: session.appDidEnterBackground()
-                    case .active: session.appDidBecomeActive()
+                    case .active:
+                        Interaction.installOnWindows()
+                        session.appDidBecomeActive()
                     default: break
                     }
                 }

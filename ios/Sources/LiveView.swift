@@ -24,6 +24,8 @@ final class LiveViewController: ObservableObject {
     @Published private(set) var state: State = .off
     /// 撮影のために一時的に止めている。映像は最後のコマのまま
     @Published private(set) var suspended = false
+    /// 放置で自動的に止まるまでの残り秒数。残りわずかになったときだけ入る
+    @Published private(set) var autoStopIn: Int?
     /// 映像は毎秒 27 回変わるので、画面全体を描き直さないよう別の観測対象に分ける
     let feed = LiveFeed()
     weak var session: CameraSession?
@@ -36,6 +38,20 @@ final class LiveViewController: ObservableObject {
     private var pauseCount = 0
     /// 開始処理の途中で止めるよう頼まれた
     private var stopRequested = false
+    private var idleWatch: Task<Void, Never>?
+
+    /// 操作されないままこの秒数が過ぎたら止める。
+    /// ライブビューはミラーを上げてセンサーを動かし続けるので、つないでいる間で一番電池を食う
+    private static var idleLimit: TimeInterval {
+        #if DEBUG
+        // 起動引数 -liveIdle=20 で短くして確かめる
+        if let arg = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("-liveIdle=") }),
+           let seconds = TimeInterval(arg.dropFirst("-liveIdle=".count)) { return seconds }
+        #endif
+        return 120
+    }
+    /// 残りがこの秒数を切ったら、止まることを知らせる
+    private static let countdownFrom: TimeInterval = 15
 
     private static let recordingMedia: UInt32 = 0xD10B        // 0 = カード, 1 = SDRAM
     private static let liveViewStatus: UInt32 = 0xD1A2
@@ -91,6 +107,7 @@ final class LiveViewController: ObservableObject {
             state = .on
             Haptics.success()
             runLoop()
+            watchIdle()
         } catch LiveViewFailure.stopped {
             await teardown()
             finishStopping()
@@ -158,6 +175,29 @@ final class LiveViewController: ObservableObject {
             try? await Task.sleep(for: .milliseconds(150))
         }
         return false
+    }
+
+    // MARK: 放置
+
+    private func watchIdle() {
+        idleWatch?.cancel()
+        Interaction.touch()
+        idleWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, self.state == .on else { return }
+                // 撮っている間は数えない（長秒時で待たされても止めない）
+                if self.suspended || self.session?.busy == true { Interaction.touch() }
+                let remaining = Self.idleLimit - Interaction.idleSeconds
+                if remaining <= 0 {
+                    Haptics.toggle()
+                    await self.stop(reason: "\(Int(Self.idleLimit)) 秒操作なし")
+                    return
+                }
+                let shown = remaining <= Self.countdownFrom ? Int(remaining.rounded(.up)) : nil
+                if shown != self.autoStopIn { self.autoStopIn = shown }
+            }
+        }
     }
 
     // MARK: コマ取り
@@ -321,6 +361,9 @@ final class LiveViewController: ObservableObject {
     }
 
     private func finishStopping() {
+        idleWatch?.cancel()
+        idleWatch = nil
+        autoStopIn = nil
         feed.clear()
         pauseCount = 0
         state = .off
@@ -374,6 +417,7 @@ final class LiveViewController: ObservableObject {
         guard !stopRequested else { return finishStopping() }
         state = .on
         Haptics.success()
+        watchIdle()
         loop = Task { [weak self] in
             var i = 0
             while !Task.isCancelled {
@@ -589,6 +633,8 @@ struct LiveStatus: View {
     @ObservedObject var feed: LiveFeed
     let state: LiveViewController.State
     let shooting: Bool
+    /// 放置で止まるまでの残り秒数
+    let autoStopIn: Int?
 
     var body: some View {
         HStack(spacing: 6) {
@@ -601,24 +647,35 @@ struct LiveStatus: View {
                     Text("開始中")
                 } else if state == .stopping {
                     Text("停止中")
+                } else if let autoStopIn {
+                    // 触れば止まらない。数字が減っていくのが見えるようにする
+                    Text("\(autoStopIn) 秒で停止").monospacedDigit()
+                        .foregroundStyle(Theme.amber)
+                        .contentTransition(.numericText(countsDown: true))
                 } else if feed.fps > 0 {
                     Text(String(format: "%.0f fps", feed.fps)).monospacedDigit()
                 }
             }
             .font(.system(size: 12))
             .foregroundStyle(Theme.dim)
+            .animation(.snappy(duration: 0.2), value: autoStopIn)
         }
     }
 }
 
 struct LiveBadge: View {
     let fps: Double
+    var autoStopIn: Int?
 
     var body: some View {
         HStack(spacing: 5) {
             Circle().fill(Theme.live).frame(width: 7, height: 7)
             Text("LIVE").font(.system(size: 11, weight: .bold))
-            if fps > 0 {
+            if let autoStopIn {
+                Text("\(autoStopIn) 秒で停止")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.amber)
+            } else if fps > 0 {
                 Text(String(format: "%.0f fps", fps))
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.7))
@@ -691,7 +748,7 @@ struct LiveFullScreen: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(Text("閉じる"))
                     Spacer()
-                    LiveBadge(fps: feed.fps)
+                    LiveBadge(fps: feed.fps, autoStopIn: live.autoStopIn)
                 }
                 Spacer()
                 ShutterButton(size: 72, busy: session.busy, enabled: true) {

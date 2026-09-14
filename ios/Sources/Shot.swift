@@ -42,6 +42,20 @@ struct Shot: Identifiable, Equatable {
 
 
 enum Preview {
+    /// ファイルの中身（JPEG など）から表示用の画像を作る。向きは画像自身の情報に従う
+    static func decode(_ data: Data, maxPixel: Int = 2400) async -> UIImage? {
+        await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+            let opts: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+            ]
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+            return UIImage(cgImage: cg)
+        }.value
+    }
+
     /// NEF に埋め込まれた JPEG から表示用の画像を作る。
     /// RAW を展開すると桁違いに遅いので、埋め込みをそのまま使う。
     static func load(_ url: URL, maxPixel: Int = 2400) async -> UIImage? {

@@ -71,7 +71,9 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
     @Published var selection: Shot.ID?
-    @Published var lastError: String?
+    @Published var lastError: String? {
+        didSet { if let lastError { reporter.note("エラー表示: \(lastError)") } }
+    }
     /// 取り込み中のカット（ファイル名 → 0〜1）。取り込みボタンがカプセルの中を満たすのに使う
     @Published private(set) var importProgress: [String: Double] = [:]
 
@@ -350,9 +352,20 @@ final class CameraSession: NSObject, ObservableObject {
     /// DeviceInfo から分かる、このカメラが受け付ける命令とプロパティ。読むまでは nil
     @Published private(set) var capabilities: CameraCapabilities?
 
-    /// ライブビューを出せるか。Nikon 1 はまだ手順を確かめていない（J1 は開始命令自体を名乗っていない）
+    /// ライブビューを出せるか。確かめた Nikon の手順だけ。Nikon 1 はまだ確かめていない（J1 は開始命令自体を名乗っていない）
     var supportsLiveView: Bool {
-        PropFormat.vendor == PropFormat.vendorNikon && capabilities?.isNikon1 != true
+        capabilities?.support == .full
+    }
+
+    /// 動作を確かめていないメーカーのカメラ。標準の命令だけで、一覧・プレビュー・取り込みを中心に動かす
+    var basicMode: Bool {
+        capabilities?.support == .basic
+    }
+
+    /// シャッターを出せるか。基本モードでは、標準の撮影命令を名乗っているカメラだけ
+    var canShoot: Bool {
+        guard let caps = capabilities else { return true }
+        return caps.support != .basic || caps.canInitiateCapture
     }
 
     /// DeviceInfo に露出まわりの設定が 1 つも載っていない（J1 は電池と時計だけ）
@@ -365,9 +378,19 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// 露出計（Nikon 0xD1B1）を読めるか
     var lightMeterAvailable: Bool {
-        guard let caps = capabilities, caps.isNikon1 else { return true }
-        return caps.properties.contains(UInt16(PTPCamera.lightMeterCode))
+        #if DEBUG
+        if demo { return true }
+        #endif
+        guard let caps = capabilities else { return false }
+        switch caps.support {
+        case .full: return true
+        case .nikon1: return caps.properties.contains(UInt16(PTPCamera.lightMeterCode))
+        case .basic: return false
+        }
     }
+
+    /// 確かめていないカメラの接続記録（配布版でも残す）
+    let reporter = CameraReporter()
 
     /// 手で接続を解除した。ケーブルを挿し直すまでは自動でつなぎ直さない
     @Published private(set) var userDisconnected = false
@@ -386,6 +409,7 @@ final class CameraSession: NSObject, ObservableObject {
             eventLoop?.cancel()
             prefetchTask?.cancel()
             DebugLog.write("接続解除: セッションを閉じる")
+            self.reporter.note("接続解除（利用者の操作）")
             cam.requestCloseSession(options: nil) { [weak self] _ in
                 Task { @MainActor in self?.sessionDidClose(cam) }
             }
@@ -503,6 +527,7 @@ final class CameraSession: NSObject, ObservableObject {
         catalogSettle?.cancel()
         if case .connected(let n) = state { state = .connecting(n) }
         DebugLog.write("背面: 接続を休ませる（セッションを閉じる）")
+        reporter.note("背面に回ったので接続を休ませた")
         // ダイナミックアイランドからは消し、ロック画面にだけしばらく「休ませています」を残す
         activity.end(final: activityContent()?.state, after: 5 * 60)
         cam.requestCloseSession(options: nil) { [weak self] _ in
@@ -568,6 +593,7 @@ final class CameraSession: NSObject, ObservableObject {
 
     private func reopen(_ cam: ICCameraDevice, reason: String = "前面へ") {
         DebugLog.write("\(reason): セッションを開き直す")
+        reporter.note("セッションを開き直す（\(reason)）")
         activitySince = Date()
         state = .connecting(cam.name ?? String(localized: "カメラ"))
         cam.requestOpenSession()
@@ -670,8 +696,10 @@ final class CameraSession: NSObject, ObservableObject {
     /// カメラが遅れていた場合は、接続時点のカメラ時刻まで基準を下げれば両方拾える。
     /// 進んでいた場合は、合わせた後のカットが基準を下回らないよう端末時刻を基準にする。
     private func isShotAfterConnecting(_ file: ICCameraFile) -> Bool {
-        guard let taken = file.creationDate, let since = connectedAt else { return catalogReady }
-        let cutoff = since.addingTimeInterval(-max(clockDrift ?? 0, 0) - 2)
+        // カメラの時計を読めない機種（基本モードで名乗っていないなど）は、撮影時刻では切れない。
+        // 一覧がそろった後に届いたものを、接続後に撮ったカットとみなす
+        guard let taken = file.creationDate, let since = connectedAt, let drift = clockDrift else { return catalogReady }
+        let cutoff = since.addingTimeInterval(-max(drift, 0) - 2)
         return taken >= cutoff
     }
 
@@ -812,6 +840,7 @@ final class CameraSession: NSObject, ObservableObject {
         catalogProgress = 100
         progressTimer?.invalidate()
         DebugLog.write("読み込み完了: テザー \(liveShots.count) / カード \(cardShots.count)")
+        reporter.note("一覧がそろった: テザー \(liveShots.count) / カード \(cardShots.count)（届いたファイル \(deliveredNames.count)）")
         #if DEBUG
         logCardLocationCoverage()
         #endif
@@ -857,6 +886,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// 抜かれたカメラの後始末。挿し直すとオブジェクトが作り直されるので、それに紐づく状態は捨てる。
     /// カットの一覧は残す。うっかりケーブルが抜けても、同じカメラなら続きから使えるように。
     private func forgetDevice() {
+        reporter.end("カメラが外れた")
         UserDefaults.standard.set(Date(), forKey: "lastSessionEnded")
         live.forget()
         userDisconnected = false
@@ -903,6 +933,8 @@ final class CameraSession: NSObject, ObservableObject {
         // 撮影時刻での判定に使うので、このカメラで最初に読んだずれを覚えておく
         if clockDrift == nil { clockDrift = drift }
         guard abs(drift) > 2 else { return }   // 誤差の範囲なら触らない
+        // 確かめていないカメラの設定は書き換えない（ずれは撮影時刻の判定で補正する）
+        guard !basicMode else { return }
         guard (try? await ptp.setCameraClock(Date())) != nil else { return }
         clockCorrection = drift
     }
@@ -1146,7 +1178,7 @@ final class CameraSession: NSObject, ObservableObject {
         // 操作を増やさずに、実機のシャッター全押しと同じ挙動にする。
         // 合わなくても撮影は止めない（AF-C や MF では合焦通知自体が来ない）。
         // Nikon 1 はまず libgphoto2 で通っている手順（標準の 0x100E だけ）に合わせ、AF 命令は確かめてから使う
-        if capabilities?.isNikon1 != true { _ = await ptp.autofocus() }
+        if capabilities?.support == .full { _ = await ptp.autofocus() }
         do {
             try await ptp.releaseShutter()
             return true
@@ -1206,10 +1238,15 @@ final class CameraSession: NSObject, ObservableObject {
         // 向きはプレビューを読むまで分からない。ImageCaptureCore が知っていればそれを使う
         let reported = Int(file.orientation.rawValue)
         let hint = reported == 1 ? nil : reported
-        file.requestThumbnailData(options: [.imageSourceThumbnailMaxPixelSize: 320]) { [weak self] data, _ in
-            guard let data, let image = UIImage(data: data) else { return }
+        file.requestThumbnailData(options: [.imageSourceThumbnailMaxPixelSize: 320]) { [weak self] data, error in
+            guard let data, let image = UIImage(data: data) else {
+                let detail = error.map { "\(($0 as NSError).domain) \(($0 as NSError).code) \($0.localizedDescription)" } ?? (data == nil ? "データなし" : "画像にできない")
+                Task { @MainActor in self?.reporter.noteThumbnail(shot.name, ok: false, detail: detail) }
+                return
+            }
             Task { @MainActor in
                 guard let self else { return }
+                self.reporter.noteThumbnail(shot.name, ok: true, detail: "\(data.count) バイト")
                 if let i = self.liveShots.firstIndex(where: { $0.name == shot.name }) {
                     self.liveShots[i].thumbnail = image.applyingCameraOrientation(self.liveShots[i].orientation ?? hint)
                 }
@@ -1236,6 +1273,7 @@ final class CameraSession: NSObject, ObservableObject {
             var image: UIImage?
 
             var orientation: Int?
+            var source = "失敗"
             // 先頭部分だけ読んで、埋め込み JPEG の位置と撮影時の向きを割り出す
             if let header = await self.read(file, offset: 0, length: 128 * 1024) {
                 orientation = NEF.orientation(in: header)
@@ -1243,12 +1281,21 @@ final class CameraSession: NSObject, ObservableObject {
                    loc.length > 0, loc.length < 40 * 1024 * 1024,
                    let jpeg = await self.read(file, offset: off_t(loc.offset), length: off_t(loc.length)) {
                     image = UIImage(data: jpeg)
+                    source = "RAW に埋め込まれた JPEG"
+                } else if header.starts(with: [0xFF, 0xD8]), file.fileSize < 30 * 1024 * 1024,
+                          let whole = await self.read(file, offset: 0, length: off_t(file.fileSize)) {
+                    // JPEG で撮るカメラ（コンパクトなど）は、ファイルそのものが表示に使える。向きは JPEG 自身が持つ
+                    image = await Preview.decode(whole)
+                    orientation = nil
+                    source = "JPEG そのもの"
                 }
             }
             // 構造を辿れないファイル形式のときは、従来のサムネイル要求に戻す
             if image == nil {
                 image = await self.thumbnailData(file, maxPixel: 2400).flatMap(UIImage.init(data:))
+                if image != nil { source = "ImageCaptureCore のサムネイル" }
             }
+            self.reporter.note("プレビュー: \(shot.name) \(source)\(image.map { " \(Int($0.size.width))×\(Int($0.size.height))" } ?? "")")
             guard let image else { return }
             #if DEBUG
             if let orientation, orientation != 1 {
@@ -1311,6 +1358,7 @@ final class CameraSession: NSObject, ObservableObject {
             }
             return true
         } catch {
+            reporter.note("写真アプリへの保存に失敗: \(url.lastPathComponent) \((error as NSError).domain) \((error as NSError).code)")
             lastError = String(localized: "写真アプリに保存できませんでした: \(error.localizedDescription)")
             return false
         }
@@ -1344,6 +1392,7 @@ final class CameraSession: NSObject, ObservableObject {
         let saved = await saveToPhotos(url, shot: shot)
         // 写真アプリへ移せなかったときも、端末に NEF を溜めない（取り込み直せばよい）
         try? FileManager.default.removeItem(at: url)
+        reporter.note("取り込み: \(shot.name) \(saved ? "写真アプリに保存" : "保存できず")")
         if saved {
             markImported(shot, preview: preview)
         } else if let preview {
@@ -1384,6 +1433,8 @@ final class CameraSession: NSObject, ObservableObject {
                 watch.stop()
                 if let error {
                     DebugLog.write("取り込みの読み出しに失敗: \(name) \(error.localizedDescription)")
+                    let nsError = error as NSError
+                    Task { @MainActor in self.reporter.note("取り込みの読み出しに失敗: \(name) \(nsError.domain) \(nsError.code) \(nsError.localizedDescription)") }
                     // まとめて取り込むときは、背面で止められただけのことが多い。戻ってからやり直すので知らせない
                     if reportErrors {
                         Task { @MainActor in self.lastError = String(localized: "取り込みに失敗しました: \(error.localizedDescription)") }
@@ -1576,7 +1627,9 @@ extension CameraSession: ICDeviceBrowserDelegate {
             self.lastCameraID = id
             self.lastKnownFileCount = id.flatMap { UserDefaults.standard.object(forKey: "cardObjects.\($0)") as? Int }
             self.camera = cam
+            self.reporter.begin(cam)
             let ptp = PTPCamera(device: cam) { DebugLog.write($0) }
+            ptp.trace = { [weak self] line in self?.reporter.note(line) }
             self.ptp = ptp
             self.live.attach(ptp, identifier: id ?? "?")
             cam.delegate = self
@@ -1605,11 +1658,13 @@ extension CameraSession: ICCameraDeviceDelegate {
         Task { @MainActor in
             guard device === self.camera else { return }
             if let error {
+                self.reporter.note("セッションを開けない: \(error.localizedDescription)（\((error as NSError).domain) \((error as NSError).code)）")
                 self.state = .failed(error.localizedDescription)
                 return
             }
             self.state = .connected(device.name ?? String(localized: "カメラ"))
             DebugLog.write("セッションを開いた")
+            self.reporter.note("セッションを開いた")
             // つないで初めて開いたときと、手で接続し直したときだけ知らせる。背面から戻るたびには鳴らさない
             let announce = self.connectedAt == nil || self.announceNextOpen
             self.announceNextOpen = false
@@ -1645,6 +1700,10 @@ extension CameraSession: ICCameraDeviceDelegate {
                 if attempt > 1 { try? await Task.sleep(for: .milliseconds(500)) }
                 await self.readVendor()
             }
+            self.reporter.identified(self.ptp?.info, support: self.capabilities?.support)
+            self.reporter.note(String(format: "準備に %.1f 秒。カード内のオブジェクト %@ 件、時計のずれ %@",
+                                      Date().timeIntervalSince(opened), self.expectedObjects.map(String.init) ?? "?",
+                                      self.clockDrift.map { String(format: "%.0f 秒", $0) } ?? "読めない"))
             if self.supportsLiveView {
                 // ライブビュー中にアプリが落ちたりケーブルが抜けたりすると、記録先が SDRAM のまま残り
                 // 本体で撮ってもカードに保存されなくなる。つないだら確かめて戻す
@@ -1653,11 +1712,12 @@ extension CameraSession: ICCameraDeviceDelegate {
             self.scheduleCatalogSettle()
             // Nikon 1 の V1・J1 などでは CheckEvent (0x90C7) で通信が壊れる（libgphoto2 #569 #716）。
             // 本体側の変更は USB のイベント（DevicePropChanged）で拾う
-            self.checkEventUsable = self.capabilities?.isNikon1 != true
+            // 基本モード（Nikon 以外）は、そもそも問い合わせる手段を持たないので回さない
+            self.checkEventUsable = self.capabilities?.support == .full
             if self.checkEventUsable || self.lightMeterAvailable {
                 self.startEventPolling()
             } else {
-                DebugLog.write("CheckEvent と露出計の問い合わせは使わない（Nikon 1）")
+                DebugLog.write("CheckEvent と露出計の問い合わせは使わない（\(self.capabilities?.support.rawValue ?? "?")）")
             }
             await self.refreshProps()
         }
@@ -1690,6 +1750,7 @@ extension CameraSession: ICCameraDeviceDelegate {
             #if DEBUG
             if !self.appActive { DebugLog.write("背面で一覧に届いた: \(files.count) 件（\(files.first?.name ?? "?")）") }
             #endif
+            self.reporter.noteFiles(files)
             self.deliveredNames.formUnion(files.compactMap(\.name))
             if self.classifyReady {
                 self.ingest(files)
@@ -1717,6 +1778,7 @@ extension CameraSession: ICCameraDeviceDelegate {
             #if DEBUG
             if !self.appActive { DebugLog.write(String(format: "背面で PTP イベント 0x%04X (0x%X)", event.code, param)) }
             #endif
+            self.reporter.note(String(format: "PTP イベント 0x%04X (0x%X)%@", event.code, param, self.appActive ? "" : "（背面）"))
             switch event.code {
             case PTPEvent.objectAdded:
                 // ObjectAdded。撮った瞬間に届くので、この時点の位置が撮影地点になる
@@ -1757,6 +1819,7 @@ extension CameraSession: ICCameraDeviceDelegate {
         Task { @MainActor in
             guard device === self.camera else { return }
             DebugLog.write("フレームワークの完了通知（この時点 \(self.deliveredNames.count) 件）")
+            self.reporter.note("ImageCaptureCore の一覧の完了通知（この時点 \(self.deliveredNames.count) 件）")
             self.frameworkCatalogDone = true
             self.scheduleCatalogSettle()
         }

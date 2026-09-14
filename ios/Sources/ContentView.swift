@@ -168,7 +168,7 @@ struct TopBar: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            CameraMenu()
+            CameraMenu(reporter: session.reporter)
             Spacer(minLength: 8)
             IconButton(systemName: session.geotagging ? "location.fill" : "location.slash",
                        tint: session.geotagging ? Theme.amber : Theme.dim,
@@ -193,8 +193,32 @@ struct TopBar: View {
 /// 機種名。つながっていれば押すとメニュー（時計合わせの結果・電池・接続解除）が開く
 struct CameraMenu: View {
     @EnvironmentObject var session: CameraSession
+    @ObservedObject var reporter: CameraReporter
+    @State private var showReports = false
 
     var body: some View {
+        content
+            .sheet(isPresented: $showReports) {
+                CameraReportsView(reporter: reporter)
+            }
+    }
+
+    /// 動作を確かめていないカメラの記録があれば、メニューから開けるようにする
+    @ViewBuilder
+    private var reportsItem: some View {
+        if !reporter.reports.isEmpty {
+            Section {
+                Button {
+                    showReports = true
+                } label: {
+                    Label("接続の記録", systemImage: "doc.text.magnifyingglass")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if session.preparing {
             status(spinner: true)
         } else if session.userDisconnected, case .idle = session.state {
@@ -228,6 +252,10 @@ struct CameraMenu: View {
                         Image(systemName: BatteryIndicator.symbol(battery.current))
                     }
                 }
+                if session.basicMode {
+                    Label("動作確認前の機種です。一覧と取り込みを中心に動かしています", systemImage: "info.circle")
+                }
+                reportsItem
                 Section {
                     Button {
                         Haptics.toggle()
@@ -249,6 +277,15 @@ struct CameraMenu: View {
                 }
                 .frame(height: 44)
                 .contentShape(Rectangle())
+            }
+        } else if !reporter.reports.isEmpty {
+            // つながっていなくても、あとから記録を取り出せるように
+            Menu {
+                reportsItem
+            } label: {
+                status(spinner: session.state == .searching || { if case .connecting = session.state { return true }; return false }())
+                    .frame(height: 44)
+                    .contentShape(Rectangle())
             }
         } else {
             status(spinner: session.state == .searching || { if case .connecting = session.state { return true }; return false }())
@@ -740,7 +777,7 @@ struct ControlPanel: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                ShutterButton(busy: session.busy, enabled: session.isConnected) {
+                ShutterButton(busy: session.busy, enabled: session.isConnected && session.canShoot) {
                     Haptics.shutter()
                     Task { await session.capture() }
                 }
@@ -761,7 +798,13 @@ struct ExposureReadout: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            if session.cannotAdjustSettings {
+            if session.basicMode {
+                Label("この機種は動作確認前です。カードの一覧・プレビュー・取り込みを中心に使えます。", systemImage: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.dim)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+            } else if session.cannotAdjustSettings {
                 Label("この機種は USB から設定を変えられません。露出や ISO は本体で設定してください。", systemImage: "info.circle")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.dim)

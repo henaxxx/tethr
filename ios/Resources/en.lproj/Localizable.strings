@@ -148,3 +148,15 @@
 "写真を取り込み中" = "Importing to Photos";
 "0 / %lld 枚" = "0 of %lld";
 "%lld / %lld 枚" = "%lld of %lld";
+
+/* 動作確認前のカメラ */
+"接続の記録" = "Connection Log";
+"記録はありません" = "No Logs";
+"動作を確かめていないカメラをつなぐと、ここに残ります。" = "Logs appear here when you connect a camera Tethr hasn’t been tested with.";
+"共有" = "Share";
+"動作を確かめていないカメラをつないだときの記録です。カメラの機種、カメラが対応を名乗った命令、送った命令の結果、一覧や取り込みの成否が入ります。シリアル番号と位置情報は入りません。共有しない限り、この端末の外には出ません。" = "Logs from cameras Tethr hasn’t been tested with: the camera model, the commands it reports, the results of the commands sent, and whether browsing and importing worked. They contain no serial numbers and no locations, and they stay on this device unless you share them.";
+"すべて削除" = "Delete All";
+"記録をすべて削除しますか" = "Delete all logs?";
+"削除" = "Delete";
+"動作確認前の機種です。一覧と取り込みを中心に動かしています" = "Not yet tested with this camera. Browsing and importing come first";
+"この機種は動作確認前です。カードの一覧・プレビュー・取り込みを中心に使えます。" = "Tethr hasn’t been tested with this camera yet. Browsing, previewing and importing should work.";

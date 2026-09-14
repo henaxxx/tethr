@@ -105,7 +105,19 @@ public final class PTPCamera {
         }
         let label = String(format: "0x%04X", op.rawValue)
         inFlight += 1
-        defer { inFlight -= 1 }
+        // 待つ上限を決めていない命令が長く返らないときは残す。止まったまま戻らない不具合を追うため
+        let started = Date()
+        let watchdog: Task<Void, Never>? = timeout == nil ? Task { [weak self] in
+            try? await Task.sleep(for: .seconds(45))
+            guard !Task.isCancelled else { return }
+            self?.log("PTP \(label) が 45 秒返らない")
+        } : nil
+        defer {
+            inFlight -= 1
+            watchdog?.cancel()
+            let elapsed = Date().timeIntervalSince(started)
+            if elapsed > 45 { log(String(format: "PTP %@ がようやく返った（%.0f 秒）", label, elapsed)) }
+        }
         return try await withCheckedThrowingContinuation { cont in
             let once = Once()
             device.requestSendPTPCommand(PTP.command(op, params: params), outData: outData) { data, response, error in

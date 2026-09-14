@@ -67,6 +67,8 @@ final class CameraSession: NSObject, ObservableObject {
 
     private let browser = ICDeviceBrowser()
     private var camera: ICCameraDevice?
+    /// 生の PTP 命令の送り先（Mac 版と共通の TethrKit）。カメラを検出したときに作り、外れたら捨てる
+    private var ptp: PTPCamera?
     /// ICCameraFile を撮影ファイル名で引けるようにしておく
     private var fileIndex: [String: ICCameraFile] = [:]
     /// サムネイル要求中・取得済みの名前。二重要求を防ぐ。
@@ -125,8 +127,6 @@ final class CameraSession: NSObject, ObservableObject {
     private var eventLoop: Task<Void, Never>?
     /// 画面が見えていない、あるいは露出計が出ていない間は問い合わせない
     private var suspended = false
-    /// Nikon が露出計を持っているプロパティ
-    private static let lightMeterProp: UInt32 = 0xD1B1
     /// CheckEvent が使えない機種向けに、一度失敗したら直接読みに切り替える
     private var checkEventUsable = true
     /// サムネイルや取り込みが走っている間はポーリングを止める
@@ -301,8 +301,6 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// DeviceInfo から分かる、このカメラが受け付ける命令とプロパティ。読むまでは nil
     @Published private(set) var capabilities: CameraCapabilities?
-    /// 送らずに断った命令。ログを 1 回ずつにする
-    private var refusalsLogged: Set<String> = []
 
     /// ライブビューを出せるか。Nikon 1 はまだ手順を確かめていない（J1 は開始命令自体を名乗っていない）
     var supportsLiveView: Bool {
@@ -320,7 +318,7 @@ final class CameraSession: NSObject, ObservableObject {
     /// 露出計（Nikon 0xD1B1）を読めるか
     var lightMeterAvailable: Bool {
         guard let caps = capabilities, caps.isNikon1 else { return true }
-        return caps.properties.contains(UInt16(Self.lightMeterProp))
+        return caps.properties.contains(UInt16(PTPCamera.lightMeterCode))
     }
 
     /// 手で接続を解除した。ケーブルを挿し直すまでは自動でつなぎ直さない
@@ -442,18 +440,13 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// メーカーを読む。白バランス等の独自の値の読み方がメーカーで違うため
     private func readVendor() async {
-        let data: Data
-        do {
-            data = try await send(.getDeviceInfo)
-        } catch {
-            DebugLog.write("DeviceInfo を読めない: \(describe(error))")
+        guard let ptp else { return }
+        let before = PropFormat.vendor
+        guard let info = await ptp.readDeviceInfo() else {
+            DebugLog.write("DeviceInfo を読めない")
             return
         }
-        guard let info = DeviceInfo(data) else {
-            DebugLog.write("DeviceInfo を解釈できない（\(data.count) バイト）")
-            return
-        }
-        capabilities = CameraCapabilities(info)
+        capabilities = ptp.capabilities
         #if DEBUG
         func hex(_ codes: [UInt16]) -> String { codes.map { String(format: "%04X", $0) }.joined(separator: " ") }
         DebugLog.write("DeviceInfo: \(info.manufacturer) \(info.model)\(capabilities?.isNikon1 == true ? "（Nikon 1）" : "")")
@@ -461,13 +454,9 @@ final class CameraSession: NSObject, ObservableObject {
         DebugLog.write("DeviceInfo イベント: " + hex(info.events))
         DebugLog.write("DeviceInfo プロパティ: " + hex(info.properties))
         #endif
-        let vendor = info.effectiveVendor
-        DebugLog.write(String(format: "メーカー 0x%08X（名乗り 0x%08X / %@）", vendor, info.vendor, info.manufacturer))
-        if PropFormat.vendor != vendor {
-            PropFormat.vendor = vendor
-            DebugLog.write(String(format: "メーカー 0x%08X", vendor))
-            objectWillChange.send()
-        }
+        DebugLog.write(String(format: "メーカー 0x%08X（名乗り 0x%08X / %@）", PropFormat.vendor, info.vendor, info.manufacturer))
+        // 独自の値の読み方が切り替わったので、表示を描き直す
+        if PropFormat.vendor != before { objectWillChange.send() }
     }
 
     /// 接続時点のオブジェクト数を数えて、次回の目安として覚えておく
@@ -665,8 +654,8 @@ final class CameraSession: NSObject, ObservableObject {
         live.forget()
         userDisconnected = false
         capabilities = nil
-        refusalsLogged = []
         camera = nil
+        ptp = nil
         fileIndex = [:]
         connectedAt = nil
         clockDrift = nil
@@ -702,25 +691,12 @@ final class CameraSession: NSObject, ObservableObject {
     /// EXIF 時刻が全部ずれ、あとから位置情報を時刻で突き合わせる際にも
     /// そのまま誤差になる。手で押させる理由がない。
     private func syncClock() async {
-        guard let data = try? await send(.getDevicePropValue, params: [PTP.dateTimeProp]),
-              let text = PTP.decodeString(data) else { return }
-
-        let parser = DateFormatter()
-        parser.dateFormat = "yyyyMMdd'T'HHmmss"
-        parser.timeZone = .current
-        // 機種によって ".0" や "Z" が付くので、先頭 15 文字だけ見る
-        let head = String(text.prefix(15))
-        guard let cameraTime = parser.date(from: head) else { return }
-
+        guard let ptp, let cameraTime = await ptp.cameraClock() else { return }
         let drift = Date().timeIntervalSince(cameraTime)
         // 撮影時刻での判定に使うので、このカメラで最初に読んだずれを覚えておく
         if clockDrift == nil { clockDrift = drift }
         guard abs(drift) > 2 else { return }   // 誤差の範囲なら触らない
-
-        let now = parser.string(from: Date())
-        guard (try? await send(.setDevicePropValue,
-                               params: [PTP.dateTimeProp],
-                               outData: PTP.encodeString(now))) != nil else { return }
+        guard (try? await ptp.setCameraClock(Date())) != nil else { return }
         clockCorrection = drift
     }
 
@@ -788,15 +764,16 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// 変化があったかどうかを返す。呼び出し側が間隔の調整に使う。
     private func pollOnce() async -> Bool {
+        guard let ptp else { return false }
         guard checkEventUsable else {
             let before = lightMeter
             await readLightMeter()
             return before != lightMeter
         }
-        let data: Data
+        let events: [PTPEvent]
         do {
-            data = try await send(.nikonCheckEvent)
-        } catch CameraError.ptp(0x2005) {
+            events = try await ptp.checkEvent()
+        } catch PTPError.response(0x2005) {
             // OperationNotSupported。対応していない機種だった。以後は露出計だけ直接読む
             checkEventUsable = false
             DebugLog.write("CheckEvent 非対応。露出計を直接読む方式に切り替え")
@@ -809,17 +786,20 @@ final class CameraSession: NSObject, ObservableObject {
         }
         #if DEBUG
         // 設定の変化以外（SDRAM への撮影 0xC101/0xC102、ライブビューの状態 0xC10C など）は調べるために残す
-        let others = Self.otherEvents(in: data)
-        if !others.isEmpty { DebugLog.write("CheckEvent: " + others.joined(separator: " ")) }
+        let others = events.filter { $0.code != PTPEvent.devicePropChanged }
+        if !others.isEmpty {
+            DebugLog.write("CheckEvent: " + others.map { String(format: "0x%04X(0x%X)", $0.code, $0.param) }.joined(separator: " "))
+        }
         #endif
-        let changed = Self.changedProperties(in: data)
+        // DevicePropChanged (0x4006) の引数が、変わったプロパティのコード
+        let changed = Set(events.filter { $0.code == PTPEvent.devicePropChanged }.map { UInt16(truncatingIfNeeded: $0.param) })
         guard !changed.isEmpty else { return false }
         // 本体のダイヤルやボタンで設定が変わった＝カメラを触っている。露出計の揺れだけは数えない
-        if changed.contains(where: { $0 != UInt16(Self.lightMeterProp) }) {
+        if changed.contains(where: { $0 != UInt16(PTPCamera.lightMeterCode) }) {
             Interaction.touch()
         }
 
-        if changed.contains(UInt16(Self.lightMeterProp)) {
+        if changed.contains(UInt16(PTPCamera.lightMeterCode)) {
             await readLightMeter()
         }
         // 露出まわりが動いたら、変わった設定だけ読み直す。
@@ -835,47 +815,9 @@ final class CameraSession: NSObject, ObservableObject {
         return true
     }
 
-    /// CheckEvent の返り値: uint16 個数 → (uint16 イベント, uint32 引数) の並び。
-    /// DevicePropChanged (0x4006) の引数が、変わったプロパティのコード。
-    private static func changedProperties(in data: Data) -> Set<UInt16> {
-        var r = PTPReader(data)
-        guard let count = r.read(UInt16.self), count < 256 else { return [] }
-        var result: Set<UInt16> = []
-        for _ in 0..<count {
-            guard let code = r.read(UInt16.self), let param = r.read(UInt32.self) else { break }
-            if code == 0x4006 { result.insert(UInt16(truncatingIfNeeded: param)) }
-        }
-        return result
-    }
-
-    private static func otherEvents(in data: Data) -> [String] {
-        var r = PTPReader(data)
-        guard let count = r.read(UInt16.self), count < 256 else { return [] }
-        var result: [String] = []
-        for _ in 0..<count {
-            guard let code = r.read(UInt16.self), let param = r.read(UInt32.self) else { break }
-            if code != 0x4006 { result.append(String(format: "0x%04X(0x%X)", code, param)) }
-        }
-        return result
-    }
-
     private func readLightMeter() async {
-        guard let data = try? await send(.getDevicePropValue, params: [Self.lightMeterProp]) else { return }
-        lightMeter = Self.decodeMeter(data)
-    }
-
-    /// 幅が機種によって違うので、返ってきたバイト数で解釈する
-    private static func decodeMeter(_ data: Data) -> Double? {
-        var r = PTPReader(data)
-        let raw: Int64?
-        switch data.count {
-        case 1: raw = r.read(Int8.self).map(Int64.init)
-        case 2: raw = r.read(Int16.self).map(Int64.init)
-        case 4: raw = r.read(Int32.self).map(Int64.init)
-        default: return nil
-        }
-        guard let raw else { return nil }
-        return Double(raw) / 6.0   // 1/6 EV 刻み
+        guard let ptp, let value = await ptp.lightMeter() else { return }
+        lightMeter = value
     }
 
     /// カタログ読み込みの進捗を拾って画面に出す。
@@ -897,66 +839,17 @@ final class CameraSession: NSObject, ObservableObject {
 
     // MARK: PTP
 
-    /// 生の PTP コマンドを送り、応答データを返す。
+    /// 生の PTP コマンドを送り、応答データを返す（送ってよいかの判定と 45 秒の見張りは PTPCamera）
     @discardableResult
     func send(_ op: PTP.Op, params: [UInt32] = [], outData: Data? = nil) async throws -> Data {
-        guard let cam = camera else { throw CameraError.notConnected }
-        // 「読めていて、通してよい」と「まだ読めていない」を取り違えないよう分けて判定する。
-        // `capabilities?.refusal(...) ?? 読む前の判定` と書くと、通してよいときの nil まで読む前扱いになり、
-        // D300 の独自命令が全部止まってライブビューも露出計も死んだ
-        let refusal: (reason: String, code: UInt16)?
-        if let caps = capabilities {
-            refusal = caps.refusal(op, params: params)
-        } else {
-            refusal = CameraCapabilities.refusalBeforeDeviceInfo(op, params: params)
-        }
-        if let refusal {
-            // 送らずに断る。Nikon 1 は名乗っていない命令や一部の独自命令で通信ごと固まる
-            let key = "\(op.rawValue)-\(params.first ?? 0)"
-            if !refusalsLogged.contains(key) {
-                refusalsLogged.insert(key)
-                DebugLog.write(String(format: "送らなかった 0x%04X%@: %@", op.rawValue,
-                                      params.first.map { String(format: "(0x%X)", $0) } ?? "", refusal.reason))
-            }
-            throw CameraError.ptp(refusal.code)
-        }
-        let label = String(format: "0x%04X", op.rawValue)
-        let started = Date()
-        let watchdog = Task {
-            try? await Task.sleep(for: .seconds(45))
-            guard !Task.isCancelled else { return }
-            DebugLog.write("PTP \(label) が45秒返らない（転送中\(transferCount)）")
-        }
-        defer {
-            watchdog.cancel()
-            let t = Date().timeIntervalSince(started)
-            if t > 45 { DebugLog.write(String(format: "PTP %@ がようやく返った（%.0f秒）", label, t)) }
-        }
-        return try await withCheckedThrowingContinuation { cont in
-            cam.requestSendPTPCommand(PTP.command(op, params: params), outData: outData) { data, response, error in
-                if let error {
-                    cont.resume(throwing: error)
-                    return
-                }
-                let code = PTP.responseCode(response)
-                guard code == 0x2001 else {
-                    cont.resume(throwing: CameraError.ptp(code))
-                    return
-                }
-                cont.resume(returning: data)
-            }
-        }
+        guard let ptp else { throw PTPError.notConnected }
+        return try await ptp.send(op, params: params, outData: outData)
     }
 
     /// 設定の現在値と選択肢をまとめて読み直す
     func refreshProps() async {
-        guard isConnected else { return }
-        var updated: [PTP.Prop: PropDesc] = [:]
-        for prop in PTP.Prop.allCases {
-            guard let data = try? await send(.getDevicePropDesc, params: [UInt32(prop.rawValue)]),
-                  let desc = PropDesc(data) else { continue }
-            updated[prop] = desc
-        }
+        guard isConnected, let ptp else { return }
+        let updated = await ptp.describeAll()
         #if DEBUG
         if props[.nikonExposureTime] == nil, let shutter = updated[.nikonExposureTime] {
             DebugLog.write("Nikon シャッタースピード 0xD100 の選択肢: " + shutter.choices.map {
@@ -967,7 +860,7 @@ final class CameraSession: NSObject, ObservableObject {
         props = updated
     }
 
-    /// 設定を書き換える。データ型に応じた幅で値を渡す必要がある。通ったかを返す。
+    /// 設定を書き換える。通ったかを返す。
     ///
     /// 読み直すのは変えた設定だけにする。全部読み直すと 1 回ごとに往復が 8 回増え、
     /// スクラバーの確定が遅れて見える。連動して変わる他の設定（M で絞りを変えたときの露出計など）は
@@ -978,16 +871,9 @@ final class CameraSession: NSObject, ObservableObject {
         #if DEBUG
         if demo { return await demoSetProp(prop, to: value) }
         #endif
-        var payload = Data()
-        switch desc.dataType {
-        case .int8, .uint8:   payload.appendLE(UInt8(truncatingIfNeeded: value))
-        case .int16, .uint16: payload.appendLE(UInt16(truncatingIfNeeded: value))
-        case .int32, .uint32: payload.appendLE(UInt32(truncatingIfNeeded: value))
-        case .int64, .uint64: payload.appendLE(UInt64(truncatingIfNeeded: value))
-        case .string:         return false
-        }
+        guard let ptp, desc.dataType != .string else { return false }
         do {
-            try await send(.setDevicePropValue, params: [UInt32(prop.rawValue)], outData: payload)
+            try await ptp.write(desc, value: value)
             if prop == .exposureProgram {
                 await refreshProps()
             } else {
@@ -1006,24 +892,8 @@ final class CameraSession: NSObject, ObservableObject {
 
     /// 1 つの設定だけ読み直す
     private func refreshProp(_ prop: PTP.Prop) async {
-        guard let data = try? await send(.getDevicePropDesc, params: [UInt32(prop.rawValue)]),
-              let desc = PropDesc(data) else { return }
+        guard let desc = await ptp?.describe(prop) else { return }
         props[prop] = desc
-    }
-
-    /// AF を走らせる。実機のシャッター半押しに相当する。
-    /// Nikon はコマンド送出後に DeviceReady を問い合わせて完了を待つ作法。
-    private func autofocus() async {
-        do {
-            try await send(.nikonAfDrive)
-        } catch {
-            // ピントが合わなくても撮影は止めない。
-            // AF-C や MF では合焦通知自体が来ないため、
-            // ここで弾くと撮れないカメラが出てくる。
-            return
-        }
-        // 合焦してカメラが落ち着くまで待つ。最大 3 秒で打ち切る。
-        await waitUntilReady(seconds: 3)
     }
 
     /// シャッターを切る。撮影後のファイルはイベント経由で一覧に加わる。
@@ -1064,66 +934,23 @@ final class CameraSession: NSObject, ObservableObject {
     /// シャッターを切る命令がカメラに受け付けられたかを返す
     @discardableResult
     private func releaseShutter() async -> Bool {
+        guard let ptp else { return false }
         // レリーズの前に必ず AF を通す。
         // 操作を増やさずに、実機のシャッター全押しと同じ挙動にする。
+        // 合わなくても撮影は止めない（AF-C や MF では合焦通知自体が来ない）。
         // Nikon 1 はまず libgphoto2 で通っている手順（標準の 0x100E だけ）に合わせ、AF 命令は確かめてから使う
-        if capabilities?.isNikon1 != true { await autofocus() }
-        var attempt = 0
-        while true {
-            attempt += 1
-            do {
-                try await send(.initiateCapture, params: [0, 0])
-                DebugLog.write("リモートシャッター 0x100E: OK")
-                return true
-            } catch CameraError.ptp(0x2019) where attempt < 5 {
-                // まだ AF やミラーが動いている。libgphoto2 と同じく、落ち着くのを待って同じ命令を送り直す。
-                // ここで別の撮影命令に切り替えると、遅れて両方が効いて何度も切れるおそれがある
-                DebugLog.write("リモートシャッター 0x100E: DeviceBusy（待って送り直す）")
-                await waitUntilReady(seconds: 2)
-            } catch CameraError.ptp(0x2019) {
-                DebugLog.write("リモートシャッター 0x100E: DeviceBusy が続いたので諦める")
-                lastError = String(localized: "撮影できませんでした: \(describe(CameraError.ptp(0x2019)))")
-                return false
-            } catch {
-                DebugLog.write("リモートシャッター 0x100E 失敗: \(describe(error))")
-                // 標準命令が通らない機種向けに Nikon 独自命令も試す
-                do {
-                    try await send(.nikonCapture, params: [0xFFFFFFFF])
-                    DebugLog.write("リモートシャッター 0x90C0: OK")
-                    return true
-                } catch {
-                    DebugLog.write("リモートシャッター 0x90C0 失敗: \(describe(error))")
-                    lastError = String(localized: "撮影できませんでした: \(describe(error))")
-                    return false
-                }
-            }
-        }
-    }
-
-    /// Nikon の作法で、カメラが次の命令を受けられるようになるまで待つ（libgphoto2 の nikon_wait_busy）。
-    /// ビジー以外の応答が返ったら、それが成功でも失敗でも待つのをやめる
-    func waitUntilReady(seconds: Double) async {
-        guard PropFormat.vendor == PropFormat.vendorNikon else {
-            try? await Task.sleep(for: .milliseconds(300))
-            return
-        }
-        let deadline = Date().addingTimeInterval(seconds)
-        while isConnected {
-            do {
-                try await send(.nikonDeviceReady)
-                return
-            } catch CameraError.ptp(let code) where code == 0x2019 || code == 0xA200 {
-                // DeviceBusy / Bulb_Release_Busy
-                guard Date() < deadline else { return }
-                try? await Task.sleep(for: .milliseconds(100))
-            } catch {
-                return
-            }
+        if capabilities?.isNikon1 != true { _ = await ptp.autofocus() }
+        do {
+            try await ptp.releaseShutter()
+            return true
+        } catch {
+            lastError = String(localized: "撮影できませんでした: \(describe(error))")
+            return false
         }
     }
 
     private func describe(_ error: Error) -> String {
-        if case CameraError.ptp(let code) = error { return PTP.responseName(code) }
+        if case PTPError.response(let code) = error { return PTP.responseName(code) }
         return error.localizedDescription
     }
 
@@ -1225,36 +1052,18 @@ final class CameraSession: NSObject, ObservableObject {
         }
     }
 
+    /// 読み出しの手順は TethrKit の CardFile（Mac 版と共通、60 秒で打ち切る）。
+    /// 読んでいる間は露出計の問い合わせを休む
     private func read(_ file: ICCameraFile, offset: off_t, length: off_t) async -> Data? {
         transferCount += 1
         defer { transferCount -= 1 }
-        let name = file.name ?? "?"
-        return await withCheckedContinuation { cont in
-            let once = ResumeOnce()
-            file.requestReadData(atOffset: offset, length: length) { data, error in
-                guard once.claim() else {
-                    DebugLog.write("打ち切った読み出しが後から返った: \(name)")
-                    return
-                }
-                if data == nil { DebugLog.write("読み出し失敗: \(name) @\(offset) \(error.map { "\($0)" } ?? "")") }
-                cont.resume(returning: data)
-            }
-            // 1.5MB ほどの埋め込み JPEG でも数秒で終わる。返ってこないものは諦める
-            Task {
-                try? await Task.sleep(for: .seconds(60))
-                guard once.claim() else { return }
-                DebugLog.write("読み出しが60秒返らないので打ち切り: \(name) @\(offset) 長さ \(length)")
-                cont.resume(returning: nil)
-            }
-        }
+        let data = await CardFile.read(file, offset: offset, length: length)
+        if data == nil { DebugLog.write("読み出し失敗: \(file.name ?? "?") @\(offset) 長さ \(length)") }
+        return data
     }
 
     private func thumbnailData(_ file: ICCameraFile, maxPixel: Int) async -> Data? {
-        await withCheckedContinuation { cont in
-            file.requestThumbnailData(options: [.imageSourceThumbnailMaxPixelSize: maxPixel]) { data, _ in
-                cont.resume(returning: data)
-            }
-        }
+        await CardFile.thumbnailData(file, maxPixel: maxPixel)
     }
 
     /// 写真アプリへ保存する。
@@ -1616,18 +1425,6 @@ private final class ProgressWatch: @unchecked Sendable {
     }
 }
 
-enum CameraError: LocalizedError {
-    case notConnected
-    case ptp(UInt16)
-
-    var errorDescription: String? {
-        switch self {
-        case .notConnected: return String(localized: "カメラが接続されていません")
-        case .ptp(let code): return String(localized: "カメラが応答しました: \(PTP.responseName(code))")
-        }
-    }
-}
-
 // MARK: - デバイス検出
 
 extension CameraSession: ICDeviceBrowserDelegate {
@@ -1644,6 +1441,9 @@ extension CameraSession: ICDeviceBrowserDelegate {
             self.lastCameraID = id
             self.lastKnownFileCount = id.flatMap { UserDefaults.standard.object(forKey: "cardObjects.\($0)") as? Int }
             self.camera = cam
+            let ptp = PTPCamera(device: cam) { DebugLog.write($0) }
+            self.ptp = ptp
+            self.live.attach(ptp, identifier: id ?? "?")
             cam.delegate = self
             self.state = .connecting(cam.name ?? String(localized: "カメラ"))
             DebugLog.write("カメラを検出: \(cam.name ?? "?") \(id ?? "?")")
@@ -1713,7 +1513,7 @@ extension CameraSession: ICCameraDeviceDelegate {
             if self.supportsLiveView {
                 // ライブビュー中にアプリが落ちたりケーブルが抜けたりすると、記録先が SDRAM のまま残り
                 // 本体で撮ってもカードに保存されなくなる。つないだら確かめて戻す
-                await LiveViewController.restoreIfInterrupted(self)
+                if let ptp = self.ptp { await NikonLiveView.restoreIfInterrupted(ptp) }
             }
             self.scheduleCatalogSettle()
             // Nikon 1 の V1・J1 などでは CheckEvent (0x90C7) で通信が壊れる（libgphoto2 #569 #716）。
@@ -1770,19 +1570,14 @@ extension CameraSession: ICCameraDeviceDelegate {
     nonisolated func cameraDeviceDidEnableAccessRestriction(_ device: ICDevice) {}
     nonisolated func cameraDeviceDidRemoveAccessRestriction(_ device: ICDevice) {}
 
-    /// カメラから届く PTP イベント。
-    ///   uint32 長さ / uint16 種別 / uint16 コード / uint32 トランザクション / uint32 引数1
+    /// カメラから届く PTP イベント（読み方は TethrKit の PTPEvent）
     nonisolated func cameraDevice(_ camera: ICCameraDevice, didReceivePTPEvent eventData: Data) {
-        let b = [UInt8](eventData)
-        guard b.count >= 8 else { return }
-        let code = UInt16(b[6]) | UInt16(b[7]) << 8
-        let param: UInt32? = b.count >= 16
-            ? UInt32(b[12]) | UInt32(b[13]) << 8 | UInt32(b[14]) << 16 | UInt32(b[15]) << 24
-            : nil
+        guard let event = PTPEvent.container(eventData) else { return }
+        let param = event.param
         Task { @MainActor in
             guard camera === self.camera else { return }
-            switch code {
-            case 0x4002:
+            switch event.code {
+            case PTPEvent.objectAdded:
                 // ObjectAdded。撮った瞬間に届くので、この時点の位置が撮影地点になる
                 let id = self.nextShotEventID
                 self.nextShotEventID += 1
@@ -1797,14 +1592,14 @@ extension CameraSession: ICCameraDeviceDelegate {
                         Task { @MainActor in self?.applyShotFix(id: id, fix) }
                     }
                 }
-                DebugLog.write("撮影通知 handle=\(param.map { String(format: "0x%08X", $0) } ?? "?")")
-            case 0x4006:
+                DebugLog.write(String(format: "撮影通知 handle=0x%08X", param))
+            case PTPEvent.devicePropChanged:
                 // DevicePropChanged。Nikon 1 のように CheckEvent を使えない機種は、本体側の変更をここで拾う
-                guard let param, !self.checkEventUsable, !self.pocketed else { return }
+                guard !self.checkEventUsable, !self.pocketed else { return }
                 if let prop = PTP.Prop(rawValue: UInt16(truncatingIfNeeded: param)) {
                     await self.refreshPropForEvent(prop)
                 }
-            case 0x400D:
+            case PTPEvent.captureComplete:
                 // CaptureComplete。撮影直後は設定が変わっていることがあるので読み直す。
                 // ポケットの中では誰も見ていないので、取り出したときにまとめて読む
                 guard !self.pocketed else { return }
@@ -1824,18 +1619,5 @@ extension CameraSession: ICCameraDeviceDelegate {
             self.frameworkCatalogDone = true
             self.scheduleCatalogSettle()
         }
-    }
-}
-
-
-/// 完了とタイムアウトのどちらか先に来た方だけを通す
-private final class ResumeOnce: @unchecked Sendable {
-    private let lock = NSLock()
-    private var done = false
-    func claim() -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard !done else { return false }
-        done = true
-        return true
     }
 }

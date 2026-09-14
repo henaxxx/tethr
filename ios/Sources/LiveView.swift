@@ -5,23 +5,14 @@ import TethrKit
 
 // MARK: - ライブビューの制御
 
-/// Nikon のライブビューを iOS から動かす。
+/// ライブビューを画面につなぐ。命令の手順は TethrKit の NikonLiveView（Mac 版と共通）が持ち、
+/// ここは iOS だけの事情を足す: 放置で止める、映像を UIImage にして出す、手応え、エラーの見せ方、デモ。
 ///
-/// 手順は libgphoto2（library.c）と同じで、probe で D300 の 640×426・27fps を確認している:
-///   ChangeCameraMode(1) → 必要なら記録先を SDRAM に → StartLiveView → DeviceReady を待つ → GetLiveViewImg を繰り返す
-///
-/// 気をつけること（どれも実機で確かめた、または libgphoto2 のソースにある）
-/// - カードの読み込みが終わるまでは、開始が OK でも映像が返らない（NotLiveView）
-/// - D300 は記録先がカードのままだと開始を拒否する（禁止条件 0x00000001）。SDRAM に切り替えると通る
-/// - 記録先を SDRAM にしたまま撮るとカードに残らない。撮るときはライブビューをいったん止めてカードへ戻す
-///   （ライブビューを付けたまま記録先だけ戻して切ったら、シャッター音が 3 回鳴って画像が届かず、
-///    以後ライブビューが開始できなくなった）
-/// - 止める命令を省くとミラーが上がったまま残る（Mac 版で確認）
-/// - レリーズモードダイヤルが Lv だとカメラが開始を拒否する
+/// 開始できるのはカードの読み込みが終わってから（それまでは開始が OK でも映像が返らない）
 @MainActor
 final class LiveViewController: ObservableObject {
 
-    enum State: Equatable { case off, starting, on, stopping }
+    typealias State = NikonLiveView.State
 
     @Published private(set) var state: State = .off
     /// 撮影のために一時的に止めている。映像は最後のコマのまま
@@ -32,15 +23,11 @@ final class LiveViewController: ObservableObject {
     let feed = LiveFeed()
     weak var session: CameraSession?
 
-    private var loop: Task<Void, Never>?
-    private var tookControl = false
-    /// こちらで記録先を SDRAM に切り替えた。止めるときにカードへ戻す
-    private var switchedToSDRAM = false
-    /// 撮影などで一時的にコマ取りを止めている数
-    private var pauseCount = 0
-    /// 開始処理の途中で止めるよう頼まれた
-    private var stopRequested = false
+    private var engine: NikonLiveView?
     private var idleWatch: Task<Void, Never>?
+    #if DEBUG
+    private var demoLoop: Task<Void, Never>?
+    #endif
 
     /// 操作されないままこの秒数が過ぎたら止める。
     /// ライブビューはミラーを上げてセンサーを動かし続けるので、つないでいる間で一番電池を食う
@@ -55,128 +42,93 @@ final class LiveViewController: ObservableObject {
     /// 残りがこの秒数を切ったら、止まることを知らせる
     private static let countdownFrom: TimeInterval = 15
 
-    private static let recordingMedia: UInt32 = 0xD10B        // 0 = カード, 1 = SDRAM
-    private static let liveViewStatus: UInt32 = 0xD1A2
-    private static let prohibitCondition: UInt32 = 0xD1A4
-
     var isActive: Bool { state != .off }
+
+    /// カメラとのやり取りを受け持つ相手を決める。セッションを開いたカメラごとに 1 つ
+    func attach(_ camera: PTPCamera, identifier: String) {
+        guard engine == nil else { return }
+        let engine = NikonLiveView(camera: camera, cameraIdentifier: identifier)
+        engine.onChange = { [weak self] in self?.engineChanged() }
+        engine.onFrame = { [weak self] jpeg in self?.feed.submit(jpeg) }
+        // 撮影中は割り込まない
+        engine.shouldPauseFrames = { [weak self] in self?.session?.busy ?? false }
+        self.engine = engine
+    }
 
     func toggle() {
         Task { state == .off ? await start() : await stop(reason: "ボタン") }
     }
 
-    // MARK: 開始
+    // MARK: 開始と停止
 
     func start() async {
         guard state == .off, let s = session, s.isConnected, s.catalogReady, !s.pocketed else { return }
-        state = .starting
         #if DEBUG
         if s.demo { return await startDemo() }
         #endif
-        stopRequested = false
-        await logWithState("ライブビュー: 開始")
-        let key = "liveViewNeedsSDRAM.\(s.cameraIdentifier ?? "?")"
-
-        do {
-            // 制御権をホストへ。ChangeCameraModeFailed は libgphoto2 も無視して進む
-            do {
-                try await s.send(.nikonChangeCameraMode, params: [1])
-                DebugLog.write("ライブビュー: 制御権 OK")
-            } catch CameraError.ptp(0xA003) {
-                DebugLog.write("ライブビュー: 制御権 ChangeCameraModeFailed（続行）")
-            }
-            tookControl = true
-            try checkStop()
-
-            // 記録先。カードのまま映像が来るなら SDRAM に触らずに済むので、まずそれを試す。
-            // だめだったカメラは覚えておき、次からは最初から SDRAM にする
-            let needsSDRAM = UserDefaults.standard.bool(forKey: key)
-            if needsSDRAM { try await setMedia(sdram: true) }
-            var ok = try await beginAndWaitForFrame()
-            if !ok && !needsSDRAM {
-                try checkStop()
-                DebugLog.write("ライブビュー: カードのままでは映像が来ない。SDRAM に切り替えて再試行")
-                try? await s.send(.nikonEndLiveView)
-                try await setMedia(sdram: true)
-                ok = try await beginAndWaitForFrame()
-                if ok { UserDefaults.standard.set(true, forKey: key) }
-            } else if ok && !needsSDRAM {
-                DebugLog.write("ライブビュー: カードのまま映像が来た（SDRAM 不要）")
-            }
-            try checkStop()
-            guard ok else { throw LiveViewFailure.noFrames }
-
-            state = .on
-            Haptics.success()
-            runLoop()
-            watchIdle()
-        } catch LiveViewFailure.stopped {
-            await teardown()
-            finishStopping()
-        } catch {
-            let message = await explain(error)
-            DebugLog.write("ライブビュー: 開始できない \(message)")
-            await teardown()
-            finishStopping()
+        guard let engine else { return }
+        if let message = await engine.start() {
             s.lastError = message
+        } else if engine.state == .on {
+            Haptics.success()
         }
     }
 
-    private func checkStop() throws {
-        if stopRequested { throw LiveViewFailure.stopped }
+    func stop(reason: String) async {
+        #if DEBUG
+        if session?.demo == true {
+            demoLoop?.cancel()
+            demoLoop = nil
+            finishStopping()
+            return
+        }
+        #endif
+        await engine?.stop(reason: reason)
     }
 
-    /// 開始の命令を送り、準備ができるのを待ってから最初の 1 コマが取れるか確かめる
-    private func beginAndWaitForFrame() async throws -> Bool {
-        guard let s = session else { return false }
-        // 撮影の直後などでまだ手が離せないうちに開始すると断られるので、先に落ち着くのを待つ
-        await s.waitUntilReady(seconds: 3)
-        var attempt = 0
-        while true {
-            try checkStop()
-            attempt += 1
-            do {
-                try await s.send(.nikonStartLiveView)
-                DebugLog.write("ライブビュー: 開始命令 OK")
-                break
-            } catch CameraError.ptp(0x2019) {
-                // DeviceBusy は libgphoto2 も成功扱いにして待つ
-                DebugLog.write("ライブビュー: 開始命令 DeviceBusy（待つ）")
-                break
-            } catch CameraError.ptp(let code) {
-                // カメラが開始そのものを拒否した。記録先がカードのままだと D300 はここで即座に断る
-                // （禁止条件 0x00000001）。それは呼び出し側が SDRAM に切り替えて再試行する
-                let condition = await readProhibitCondition()
-                await logWithState("ライブビュー: 開始命令を拒否された \(PTP.responseName(code))（\(attempt) 回目）")
-                guard let condition, attempt < 8 else { return false }
-                if condition & 1 != 0 {
-                    // 記録先がカード。SDRAM で開いている最中なら、撮り終えたカメラが自分でカードに戻したので切り替え直す
-                    guard switchedToSDRAM else { return false }
-                    try? await writeMedia(sdram: true)
-                }
-                // 撮影後の書き込み中（ビット 15）や、理由が出ていないだけのときは少し待てば通ることがある
-                guard condition & ~((1 << 15) | 1) == 0 else { return false }
-                try? await Task.sleep(for: .milliseconds(500))
-                await s.waitUntilReady(seconds: 2)
-            }
+    /// 撮影の間はライブビューを止めて、記録先をカードに戻しておく。撮り終えたら開き直す（手順は NikonLiveView）
+    func whileSuspended(_ body: () async -> Bool) async {
+        guard let engine, let s = session else {
+            _ = await body()
+            return
         }
-        // ミラーが上がって準備ができるまで（D300 で 1 秒ほど）
-        try checkStop()
-        await s.waitUntilReady(seconds: 5)
-        for _ in 0..<15 {
-            try checkStop()
-            do {
-                let data = try await s.send(.nikonGetLiveViewImg)
-                if let image = await LiveFeed.decode(data) {
-                    feed.show(image)
-                    return true
-                }
-            } catch CameraError.ptp(let code) where code == 0xA00B || code == 0x2019 {
-                // まだ始まっていない、またはビジー
-            }
-            try? await Task.sleep(for: .milliseconds(150))
+        if let problem = await engine.whileSuspended(shotCount: { s.shotNotificationCount },
+                                                     waitSeconds: s.captureWaitSeconds, body) {
+            s.lastError = problem
         }
-        return false
+    }
+
+    /// ケーブルが抜けた。命令は送れないので状態だけ捨てる。
+    /// 記録先が SDRAM のまま残っている可能性は、次に接続したときに直す
+    func forget() {
+        engine?.forget()
+        engine = nil
+        #if DEBUG
+        demoLoop?.cancel()
+        demoLoop = nil
+        #endif
+        finishStopping()
+    }
+
+    private func engineChanged() {
+        guard let engine else { return }
+        let wasOn = state == .on
+        state = engine.state
+        suspended = engine.suspended
+        if state == .on, !wasOn {
+            watchIdle()
+        } else if state == .off {
+            finishStopping()
+        }
+    }
+
+    private func finishStopping() {
+        idleWatch?.cancel()
+        idleWatch = nil
+        autoStopIn = nil
+        feed.clear()
+        suspended = false
+        state = .off
     }
 
     // MARK: 放置
@@ -202,225 +154,20 @@ final class LiveViewController: ObservableObject {
         }
     }
 
-    // MARK: コマ取り
-
-    private func runLoop() {
-        loop?.cancel()
-        loop = Task { [weak self] in
-            var errors = 0
-            while !Task.isCancelled {
-                guard let self, let s = self.session else { return }
-                // 撮影中や設定の書き込み中は割り込まない
-                if self.pauseCount > 0 || s.busy {
-                    try? await Task.sleep(for: .milliseconds(60))
-                    continue
-                }
-                do {
-                    let data = try await s.send(.nikonGetLiveViewImg)
-                    guard !Task.isCancelled else { return }
-                    if let image = await LiveFeed.decode(data) {
-                        self.feed.show(image)
-                    }
-                    errors = 0
-                } catch CameraError.ptp(0x2019) {
-                    try? await Task.sleep(for: .milliseconds(40))
-                } catch CameraError.ptp(0xA00B) {
-                    // カメラ側でライブビューが止まった（撮影の直後、本体の操作、温度など）。1 度だけ開き直す
-                    guard !Task.isCancelled, self.pauseCount == 0 else { continue }
-                    DebugLog.write("ライブビュー: カメラ側で止まった。開き直す")
-                    if (try? await self.beginAndWaitForFrame()) != true {
-                        await self.stop(reason: "カメラ側で止まり、開き直せなかった")
-                        return
-                    }
-                } catch {
-                    errors += 1
-                    if errors >= 5 {
-                        await self.stop(reason: "コマ取りが続けて失敗: \(error)")
-                        return
-                    }
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-            }
-        }
-    }
-
-    /// 撮影の間はライブビューを止めて、記録先をカードに戻しておく。撮り終えたら開き直す。
-    ///
-    /// ライブビューを付けたまま記録先だけカードに戻して切ると、D300 はシャッター音が 3 回鳴り、
-    /// 画像が届かず、そのあとライブビューを開始できなくなった。D300 本体もライブビュー中の撮影では
-    /// ミラーを下ろすので、止めてから普段どおりに撮るのが一番確実
-    func whileSuspended(_ body: () async -> Bool) async {
-        guard state == .on, let s = session else {
-            _ = await body()
-            return
-        }
-        pauseCount += 1
-        suspended = true
-        defer {
-            suspended = false
-            pauseCount = max(0, pauseCount - 1)
-        }
-        DebugLog.write("ライブビュー: 撮影のため止める")
-        do {
-            try await s.send(.nikonEndLiveView)
-        } catch {
-            DebugLog.write("ライブビュー: 終了命令 失敗 \(error)")
-        }
-        await s.waitUntilReady(seconds: 3)
-        if switchedToSDRAM {
-            do {
-                try await writeMedia(sdram: false)
-            } catch {
-                // カードに戻せないまま切ると SDRAM にしか残らない。撮らずにやめる
-                await logWithState("ライブビュー: 記録先をカードに戻せない \(error)")
-                s.lastError = String(localized: "記録先をカードに戻せなかったため、撮影をやめました。")
-                await stop(reason: "記録先をカードに戻せない")
-                return
-            }
-        }
-        await logWithState("ライブビュー: 撮影前")
-
-        let before = s.shotNotificationCount
-        let fired = await body()
-
-        if fired {
-            // 撮り終えるまで待つ。D300 は書き込みの間も DeviceReady は OK のまま開始命令だけを断り
-            // （InvalidStatus・禁止条件 0）、書き終えると記録先を自分でカードに戻す。
-            // 撮影通知（ObjectAdded）が届いてから開き直す
-            let started = Date()
-            let deadline = started.addingTimeInterval(s.captureWaitSeconds)
-            while s.shotNotificationCount == before, Date() < deadline, state == .on, s.isConnected {
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-            let waited = String(format: "%.1f", Date().timeIntervalSince(started))
-            DebugLog.write(s.shotNotificationCount == before
-                ? "ライブビュー: 撮影通知が \(waited) 秒来ないまま開き直す"
-                : "ライブビュー: 撮影通知まで \(waited) 秒")
-        }
-        await s.waitUntilReady(seconds: 60)
-        // 撮っている間にボタンやケーブル抜けで止められていたら、開き直さない
-        guard state == .on else { return }
-        do {
-            if switchedToSDRAM { try await writeMedia(sdram: true) }
-            if try await beginAndWaitForFrame() {
-                DebugLog.write("ライブビュー: 撮影後に再開")
-                return
-            }
-        } catch {
-            DebugLog.write("ライブビュー: 撮影後の再開で失敗 \(error)")
-        }
-        suspended = false
-        pauseCount = 0
-        await stop(reason: "撮影後に開き直せなかった")
-    }
-
-    // MARK: 停止
-
-    func stop(reason: String) async {
-        switch state {
-        case .off, .stopping:
-            return
-        case .starting:
-            // 開始処理が自分で片付ける
-            stopRequested = true
-            return
-        case .on:
-            break
-        }
-        state = .stopping
-        loop?.cancel()
-        loop = nil
-        DebugLog.write("ライブビュー: 停止（\(reason)）")
-        await teardown()
-        finishStopping()
-    }
-
-    /// 止める命令を必ず送り、記録先と制御権をカメラに返す
-    private func teardown() async {
-        guard let s = session, s.isConnected else { return }
-        var steps: [String] = []
-        func run(_ label: String, _ work: () async throws -> Void) async {
-            do {
-                try await work()
-                steps.append("\(label) OK")
-            } catch CameraError.ptp(let code) {
-                steps.append("\(label) \(PTP.responseName(code))")
-            } catch {
-                steps.append("\(label) \(error)")
-            }
-        }
-        await run("終了") { try await s.send(.nikonEndLiveView) }
-        await s.waitUntilReady(seconds: 3)
-        if switchedToSDRAM {
-            await run("カードへ") { try await self.writeMedia(sdram: false) }
-            switchedToSDRAM = false
-        }
-        if tookControl {
-            await run("制御権を返す") { try await s.send(.nikonChangeCameraMode, params: [0]) }
-            tookControl = false
-        }
-        await logWithState("ライブビュー: 後始末 \(steps.joined(separator: " / "))")
-    }
-
-    private func finishStopping() {
-        idleWatch?.cancel()
-        idleWatch = nil
-        autoStopIn = nil
-        feed.clear()
-        pauseCount = 0
-        state = .off
-    }
-
-    /// ケーブルが抜けた。命令は送れないので状態だけ捨てる。
-    /// 記録先が SDRAM のまま残っている可能性は、次に接続したときに直す
-    func forget() {
-        loop?.cancel()
-        loop = nil
-        tookControl = false
-        switchedToSDRAM = false
-        stopRequested = true
-        finishStopping()
-    }
-
-    // MARK: 記録先
-
-    private func setMedia(sdram: Bool) async throws {
-        try await writeMedia(sdram: sdram)
-        switchedToSDRAM = sdram
-        DebugLog.write("ライブビュー: 記録先を \(sdram ? "SDRAM" : "カード") に")
-    }
-
-    private func writeMedia(sdram: Bool) async throws {
-        guard let s = session else { return }
-        try await s.send(.setDevicePropValue, params: [Self.recordingMedia], outData: Data([sdram ? 1 : 0]))
-    }
-
-    /// 前回のライブビューが中断されて残っていたら、カメラを普段の状態に戻す。接続のたびに呼ぶ
-    static func restoreIfInterrupted(_ s: CameraSession) async {
-        if let d = try? await s.send(.getDevicePropValue, params: [liveViewStatus]), d.first == 1 {
-            try? await s.send(.nikonEndLiveView)
-            try? await s.send(.nikonChangeCameraMode, params: [0])
-            DebugLog.write("前回のライブビューが残っていたので止めた")
-        }
-        if let d = try? await s.send(.getDevicePropValue, params: [recordingMedia]), d.first == 1 {
-            try? await s.send(.setDevicePropValue, params: [recordingMedia], outData: Data([0]))
-            DebugLog.write("記録先が SDRAM のまま残っていたのでカードに戻した")
-        }
-    }
-
     #if DEBUG
     /// デモ（起動引数 -demo）では、太陽が動くだけの映像を流す
     private func startDemo() async {
+        state = .starting
         let frames = (0..<24).map { i -> UIImage in
             DemoImage.make(seed: 4, portrait: false, sunShift: Double(i) / 24)
                 .preparingThumbnail(of: CGSize(width: 640, height: 426)) ?? UIImage()
         }
         try? await Task.sleep(for: .milliseconds(600))
-        guard !stopRequested else { return finishStopping() }
+        guard state == .starting else { return }
         state = .on
         Haptics.success()
         watchIdle()
-        loop = Task { [weak self] in
+        demoLoop = Task { [weak self] in
             var i = 0
             while !Task.isCancelled {
                 guard let self else { return }
@@ -431,63 +178,6 @@ final class LiveViewController: ObservableObject {
         }
     }
     #endif
-
-    // MARK: 失敗の説明
-
-    enum LiveViewFailure: Error { case noFrames, stopped }
-
-    private func readProhibitCondition() async -> UInt32? {
-        guard let s = session,
-              let d = try? await s.send(.getDevicePropValue, params: [Self.prohibitCondition]), d.count >= 4 else { return nil }
-        return UInt32(d[d.startIndex]) | UInt32(d[d.startIndex + 1]) << 8
-             | UInt32(d[d.startIndex + 2]) << 16 | UInt32(d[d.startIndex + 3]) << 24
-    }
-
-    private func logWithState(_ message: String) async {
-        let state = await cameraState()
-        DebugLog.write("\(message) \(state)")
-    }
-
-    /// ログ用。カメラ側から見たライブビューの状態、記録先、禁止条件、DeviceReady の応答
-    private func cameraState() async -> String {
-        guard let s = session else { return "" }
-        func byte(_ prop: UInt32) async -> String {
-            guard let d = try? await s.send(.getDevicePropValue, params: [prop]), let b = d.first else { return "?" }
-            return String(b)
-        }
-        let status = await byte(Self.liveViewStatus)
-        let media = await byte(Self.recordingMedia)
-        let condition = await readProhibitCondition().map { String(format: "0x%08X", $0) } ?? "?"
-        let ready: String
-        do {
-            try await s.send(.nikonDeviceReady)
-            ready = "OK"
-        } catch CameraError.ptp(let code) {
-            ready = PTP.responseName(code)
-        } catch {
-            ready = "\(error)"
-        }
-        return "[LV=\(status) 記録先=\(media) 禁止=\(condition) Ready=\(ready)]"
-    }
-
-    /// 開始できなかった理由を、カメラの禁止条件（libgphoto2 のビット定義）から言葉にする
-    private func explain(_ error: Error) async -> String {
-        DebugLog.write("ライブビュー: 失敗の元 \(error)")
-        guard let bits = await readProhibitCondition() else {
-            return String(localized: "ライブビューを開始できませんでした。レリーズモードダイヤルが Lv になっていないか確認してください。")
-        }
-        func has(_ bit: Int) -> Bool { bits & (1 << bit) != 0 }
-        if has(8)  { return String(localized: "カメラの電池が足りないため、ライブビューを開始できません。") }
-        if has(17) { return String(localized: "カメラの温度が上がっているため、ライブビューを開始できません。しばらく休ませてください。") }
-        if has(14) || has(18) || has(19) || has(20) {
-            return String(localized: "カードを確認してください（入っていない、書き込み禁止、エラー、未フォーマットのいずれか）。")
-        }
-        if has(31) { return String(localized: "撮影モードを P・A・S・M のいずれかにしてください。") }
-        if has(21) { return String(localized: "バルブではライブビューを使えません。") }
-        if has(4)  { return String(localized: "シャッターボタンが押されたままです。") }
-        if has(22) { return String(localized: "ミラーアップ中はライブビューを使えません。") }
-        return String(localized: "ライブビューを開始できませんでした（\(String(format: "0x%08X", bits))）。レリーズモードダイヤルが Lv になっていないか確認してください。")
-    }
 }
 
 // MARK: - 映像
@@ -500,6 +190,27 @@ final class LiveFeed: ObservableObject {
 
     private var count = 0
     private var windowStart = Date()
+    /// 展開を待っている最新のコマ。展開が追いつかなければ古いコマは飛ばす
+    private var pending: Data?
+    private var decoding = false
+    /// 止めたあとに、展開中だったコマが遅れて出ないようにする
+    private var generation = 0
+
+    /// 届いた JPEG を主スレッドの外で展開してから出す。届いた順は崩さない
+    func submit(_ jpeg: Data) {
+        pending = jpeg
+        guard !decoding else { return }
+        decoding = true
+        Task {
+            while let data = pending {
+                pending = nil
+                let started = generation
+                let image = await Self.decode(data)
+                if let image, started == generation { show(image) }
+            }
+            decoding = false
+        }
+    }
 
     func show(_ image: UIImage) {
         frame = image
@@ -513,22 +224,18 @@ final class LiveFeed: ObservableObject {
     }
 
     func clear() {
+        generation += 1
+        pending = nil
         frame = nil
         fps = 0
         count = 0
         windowStart = Date()
     }
 
-    /// Nikon のライブビュー画像は独自ヘッダ（D300 で 64 バイト）の後ろに JPEG が続く。
     /// 描画時に主スレッドで展開されないよう、ここで展開まで済ませる
-    nonisolated static func decode(_ data: Data) async -> UIImage? {
+    nonisolated static func decode(_ jpeg: Data) async -> UIImage? {
         await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            let bytes = [UInt8](data.prefix(4096))
-            guard bytes.count > 3,
-                  let start = (0..<(bytes.count - 2)).first(where: { bytes[$0] == 0xFF && bytes[$0 + 1] == 0xD8 && bytes[$0 + 2] == 0xFF })
-            else { return nil }
-            let jpeg = data.subdata(in: (data.startIndex + start)..<data.endIndex)
-            return UIImage(data: jpeg)?.preparingForDisplay()
+            UIImage(data: jpeg)?.preparingForDisplay()
         }.value
     }
 }

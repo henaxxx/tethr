@@ -5,6 +5,7 @@ import TethrUI
 import UIKit
 import Photos
 import CoreLocation
+import Combine
 
 enum LinkState: Equatable {
     case idle
@@ -23,7 +24,15 @@ enum LinkState: Equatable {
 final class CameraSession: NSObject, ObservableObject {
 
     @Published private(set) var state: LinkState = .idle {
-        didSet { updatePocketWatch() }
+        didSet {
+            updatePocketWatch()
+            switch state {
+            case .connecting, .connected:
+                if activitySince == nil { activitySince = Date() }
+            default:
+                activitySince = nil
+            }
+        }
     }
     /// 接続中に撮ったカット。テザー撮影の主役はこちら。
     @Published private(set) var liveShots: [Shot] = []
@@ -125,6 +134,15 @@ final class CameraSession: NSObject, ObservableObject {
     /// 閉じ終わる前に前面へ戻ってきた
     private var reopenAfterClose = false
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// 背面に回ったあとも、しばらく接続を保っている（読み込みを続け、届いたカットも受ける）
+    private var backgroundWatch: Task<Void, Never>?
+    /// 背面で接続を保つ期限。ダイナミックアイランドに残り時間を出す
+    @Published private(set) var backgroundKeepUntil: Date?
+    /// ダイナミックアイランドとロック画面の表示
+    private let activity = LiveActivityController()
+    private var activityObservation: AnyCancellable?
+    /// 接続を始めた時刻（準備中の経過時間の起点）
+    private var activitySince: Date?
     private var eventLoop: Task<Void, Never>?
     /// 画面が見えていない、あるいは露出計が出ていない間は問い合わせない
     private var suspended = false
@@ -200,6 +218,10 @@ final class CameraSession: NSObject, ObservableObject {
         pocketModeEnabled = UserDefaults.standard.object(forKey: "pocketMode") as? Bool ?? true
         pocket.onChange = { [weak self] value in self?.pocketChanged(value) }
         live.session = self
+        // 画面に出している状態が変わったら、ダイナミックアイランドにも反映する（細かい変化はまとめる）
+        activityObservation = objectWillChange
+            .throttle(for: .milliseconds(800), scheduler: RunLoop.main, latest: true)
+            .sink { [weak self] _ in self?.refreshActivity() }
     }
 
     private func updatePocketWatch() {
@@ -371,30 +393,119 @@ final class CameraSession: NSObject, ObservableObject {
         // 背面に回ったあとは予告なく終了させられることがある。控えた位置をここで書き出しておく
         geoLog.save()
         guard let cam = camera, cam.hasOpenSession else { return }
-        closedForBackground = true
-        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "close-camera-session") { [weak self] in
-            Task { @MainActor in self?.endBackgroundTask() }
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "camera-session") { [weak self] in
+            Task { @MainActor in self?.backgroundTimeExpired() }
         }
         Task {
-            // ライブビュー中なら、閉じる前に必ず止める。止める命令を省くとミラーが上がったまま残り、
+            // ライブビューは誰も見ていないので止める。止める命令を省くとミラーが上がったまま残り、
             // 記録先も SDRAM のままになってカードに保存されなくなる
             if live.isActive { await live.stop(reason: "背面へ") }
-            eventLoop?.cancel()
-            if case .connected(let n) = state { state = .connecting(n) }
-            DebugLog.write("背面へ: セッションを閉じる")
-            cam.requestCloseSession(options: nil) { [weak self] _ in
-                Task { @MainActor in
-                    self?.sessionDidClose(cam)
-                    self?.endBackgroundTask()
+            keepSessionInBackground(cam)
+        }
+    }
+
+    /// 背面に回っても、すぐにはセッションを閉じない。
+    ///
+    /// 以前は背面に回った瞬間に閉じていた（開いたまま iOS に止められると、カメラ側に接続が半開きで残り、
+    /// 次の接続で 20〜36 秒待たされるため）。それだと接続の準備やカードの読み込みも止まるので、
+    /// 猶予のうちは続け、ダイナミックアイランドに進み具合と残り時間を出す。
+    ///
+    /// 保つのは最長でも約 30 秒。D300 と iPhone 15 Pro で確かめたところ、
+    /// - iOS が背面で許す猶予は約 30 秒。止められる 8 秒前には行儀よく閉じる
+    /// - 背面でも位置の記録でアプリが動き続けているときでも、背面に回って約 30 秒たつと
+    ///   ImageCaptureCore は一覧のファイルも撮影通知も届けなくなる（読み込みは 463 件中 413 件で止まり、
+    ///   2 分後と 3 分半後に撮った 2 枚も届かなかった）。前面に戻ると、溜まっていた分がまとめて届く。
+    ///   それ以上保っても電池を食うだけなので、位置の記録中でも 30 秒で閉じる
+    private func keepSessionInBackground(_ cam: ICCameraDevice) {
+        guard !appActive else {
+            endBackgroundTask()
+            return
+        }
+        let entered = Date()
+        DebugLog.write("背面へ: 接続を保つ（iOS の猶予 \(Self.describeRemaining())、読み込み\(catalogReady ? "済み" : "中")）")
+        // 前面にいた時間が短いと、iOS の猶予が前回の残りのまま（実機で 6 秒）のことがある。待たずにその場で閉じる
+        if UIApplication.shared.backgroundTimeRemaining < 10 {
+            closeForBackground(cam)
+            return
+        }
+        backgroundWatch?.cancel()
+        backgroundWatch = Task { [weak self] in
+            var lastReport = entered
+            while !Task.isCancelled {
+                guard let self, self.camera === cam, cam.hasOpenSession, !self.appActive else { return }
+                let now = Date()
+                var deadline = entered.addingTimeInterval(28)
+                let remaining = UIApplication.shared.backgroundTimeRemaining
+                if remaining < 1e6 { deadline = min(deadline, now.addingTimeInterval(remaining - 8)) }
+                // 毎秒わずかにずれるので、目に見えるほど変わったときだけ表示を書き換える
+                if abs((self.backgroundKeepUntil ?? .distantPast).timeIntervalSince(deadline)) > 2 {
+                    self.backgroundKeepUntil = deadline
                 }
+                if now >= deadline { break }
+                #if DEBUG
+                if now.timeIntervalSince(lastReport) >= 10 {
+                    lastReport = now
+                    DebugLog.write("背面 \(Int(now.timeIntervalSince(entered))) 秒: 猶予 \(Self.describeRemaining())、届いたファイル \(self.deliveredNames.count)、テザー \(self.liveShots.count) 枚")
+                }
+                #endif
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard let self, !Task.isCancelled, !self.appActive, self.camera === cam else { return }
+            self.closeForBackground(cam)
+        }
+    }
+
+    private static func describeRemaining() -> String {
+        let remaining = UIApplication.shared.backgroundTimeRemaining
+        return remaining > 1e6 ? "無制限" : String(format: "%.0f 秒", remaining)
+    }
+
+    /// 背面で保っていた接続を、行儀よく閉じる。アプリに戻ると開き直す（同じカメラなら 0.1 秒）
+    private func closeForBackground(_ cam: ICCameraDevice) {
+        backgroundWatch = nil
+        backgroundKeepUntil = nil
+        guard cam.hasOpenSession, !closedForBackground else {
+            endBackgroundTask()
+            return
+        }
+        closedForBackground = true
+        eventLoop?.cancel()
+        catalogSettle?.cancel()
+        if case .connected(let n) = state { state = .connecting(n) }
+        DebugLog.write("背面: 接続を休ませる（セッションを閉じる）")
+        // ダイナミックアイランドからは消し、ロック画面にだけしばらく「休ませています」を残す
+        activity.end(final: activityContent()?.state, after: 5 * 60)
+        cam.requestCloseSession(options: nil) { [weak self] _ in
+            Task { @MainActor in
+                self?.sessionDidClose(cam)
+                self?.endBackgroundTask()
             }
         }
+    }
+
+    /// iOS の猶予が尽きた。アプリが背面でも動き続けている（軌跡の記録中）なら、接続は keepSessionInBackground が閉じる
+    private func backgroundTimeExpired() {
+        let unlimited = UIApplication.shared.backgroundTimeRemaining > 1e6
+        DebugLog.write("背面: iOS の猶予が切れた（接続は\(camera?.hasOpenSession == true ? "開いたまま" : "閉じている")、アプリは\(unlimited ? "動き続ける" : "止められる")）")
+        if !unlimited, let cam = camera, cam.hasOpenSession {
+            closeForBackground(cam)
+        }
+        endBackgroundTask()
     }
 
     func appDidBecomeActive() {
         appActive = true
         updatePocketWatch()
         location.appDidBecomeActive()
+        if backgroundWatch != nil {
+            // 背面にいる間も接続を保っていた。開き直さずにそのまま使う
+            backgroundWatch?.cancel()
+            backgroundWatch = nil
+            backgroundKeepUntil = nil
+            endBackgroundTask()
+            DebugLog.write("前面へ: 接続は保ったまま")
+            return
+        }
         guard closedForBackground, let cam = camera else { return }
         closedForBackground = false
         if cam.hasOpenSession {
@@ -427,8 +538,55 @@ final class CameraSession: NSObject, ObservableObject {
 
     private func reopen(_ cam: ICCameraDevice, reason: String = "前面へ") {
         DebugLog.write("\(reason): セッションを開き直す")
+        activitySince = Date()
         state = .connecting(cam.name ?? String(localized: "カメラ"))
         cam.requestOpenSession()
+    }
+
+    // MARK: ダイナミックアイランド
+
+    private func refreshActivity() {
+        guard let content = activityContent() else {
+            activity.end()
+            return
+        }
+        // 背面で休ませたあとの中身は、closeForBackground が最後に 1 回だけ出す
+        guard !(closedForBackground && !appActive) else { return }
+        activity.show(name: content.name, state: content.state, appActive: appActive)
+    }
+
+    private func activityContent() -> (name: String, state: TethrActivityAttributes.ContentState)? {
+        let name: String
+        let phase: TethrActivityAttributes.ContentState.Phase
+        switch state {
+        case .connecting(let n):
+            name = n
+            phase = closedForBackground ? .paused : .preparing
+        case .connected(let n):
+            name = n
+            phase = preparing ? .preparing : (catalogReady ? .connected : .loading)
+        default:
+            return nil
+        }
+        var content = TethrActivityAttributes.ContentState(phase: phase, since: activitySince ?? Date())
+        content.loaded = deliveredNames.count
+        content.expected = expectedObjects
+        content.shots = liveShots.count
+        content.lastShot = liveShots.first?.name
+        content.battery = props[.batteryLevel].map { Int($0.current) }
+        content.keepUntil = backgroundKeepUntil
+        #if DEBUG
+        // 起動引数 -demoActivity=loading などで、表示だけを確かめる
+        if demo, let forced = Self.demoArgument("demoActivity"),
+           let forcedPhase = TethrActivityAttributes.ContentState.Phase(rawValue: String(forced)) {
+            content.phase = forcedPhase
+            content.loaded = 234
+            content.expected = 455
+            content.since = Date().addingTimeInterval(-12)
+            if forcedPhase == .connected { content.keepUntil = Date().addingTimeInterval(24) }
+        }
+        #endif
+        return (name, content)
     }
 
     private func endBackgroundTask() {
@@ -587,9 +745,21 @@ final class CameraSession: NSObject, ObservableObject {
         catalogSettle?.cancel()
         catalogSettle = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(1500))
-            guard !Task.isCancelled else { return }
-            self?.finishCatalog()
+            guard let self, !Task.isCancelled, self.canSettleCatalog else { return }
+            // 接続時に数えたオブジェクト数（フォルダのぶん少し多い）にまだ届いていなければ、しばらく待つ（Mac 版と同じ判定）
+            if let expected = self.expectedObjects, self.deliveredNames.count + 10 < expected {
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled, self.canSettleCatalog else { return }
+                DebugLog.write("読み込み: \(expected) 件のうち \(self.deliveredNames.count) 件で到着が止まった")
+            }
+            self.finishCatalog()
         }
+    }
+
+    /// 背面で接続を休ませている間は、ファイルが届かないだけで出そろったわけではない
+    /// （以前は休ませた直後に 460 件中 132 件で「読み込み完了」になった）
+    private var canSettleCatalog: Bool {
+        camera?.hasOpenSession == true && !closedForBackground
     }
 
     private func finishCatalog() {
@@ -1456,6 +1626,9 @@ extension CameraSession: ICCameraDeviceDelegate {
         let files = items.compactMap { $0 as? ICCameraFile }
         Task { @MainActor in
             guard camera === self.camera else { return }
+            #if DEBUG
+            if !self.appActive { DebugLog.write("背面で一覧に届いた: \(files.count) 件（\(files.first?.name ?? "?")）") }
+            #endif
             self.deliveredNames.formUnion(files.compactMap(\.name))
             if self.classifyReady {
                 self.ingest(files)
@@ -1480,6 +1653,9 @@ extension CameraSession: ICCameraDeviceDelegate {
         let param = event.param
         Task { @MainActor in
             guard camera === self.camera else { return }
+            #if DEBUG
+            if !self.appActive { DebugLog.write(String(format: "背面で PTP イベント 0x%04X (0x%X)", event.code, param)) }
+            #endif
             switch event.code {
             case PTPEvent.objectAdded:
                 // ObjectAdded。撮った瞬間に届くので、この時点の位置が撮影地点になる

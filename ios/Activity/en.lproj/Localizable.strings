@@ -1,0 +1,14 @@
+/* ダイナミックアイランドとロック画面 */
+"%lld 枚" = "%lld shots";
+"休止" = "Paused";
+"Tethr を開くと再接続します" = "Open Tethr to reconnect";
+"カードを確認中" = "Checking the card";
+"カードを読み込み中" = "Reading the card";
+"接続中" = "Connected";
+"接続を休ませています" = "Connection paused";
+"アプリに戻ると、続きから始めます" = "Return to Tethr to pick up where you left off";
+"接続を休ませるまで" = "Pausing in";
+"撮ったカット %lld 枚・最新 %@" = "%lld shots · latest %@";
+"電源を入れた直後は、1 分ほどかかることがあります" = "Right after power-on this can take about a minute";
+"シャッターを切ると、ここに届いた枚数が出ます" = "Shots you take are counted here";
+"ホーム画面にいる間も、しばらく読み込みを続けます" = "Keeps reading for a little while after you leave Tethr";
